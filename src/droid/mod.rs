@@ -85,7 +85,8 @@ impl DroidManagementProxy {
 /// `--droid-local`). It must NEVER fall through to the Amp branch and hit
 /// `ampcode.com`.
 ///
-/// Inventory verified against the `droid` CLI binary (v0.127.0):
+/// Inventory verified against the `droid` CLI binary (v0.131.0):
+///   - `app/auth/me`
 ///   - `cli/whoami`, `cli/org`
 ///   - `feature-flags`
 ///   - `organization/managed-settings`, `organization/agent-readiness-reports`,
@@ -94,7 +95,7 @@ impl DroidManagementProxy {
 ///   - `sessions/create`, `sessions/{id}` and its subpaths
 ///     (`update-settings`, `update-title`, `message/create`, `droid-status`,
 ///     `archive`, `unarchive`, `privacy`, `git-ai/checkpoints`, `git-ai/notes`,
-///     `git-ai/pull-requests`)
+///     `git-ai/pull-requests`, `pin`), `sessions/pinned`
 ///   - `llm/o/v1/*`, `llm/a/v1/*`, `llm/g/v1/generate`,
 ///     `llm/custom/usage`, `llm/failed-requests`
 ///   - `daemon/heartbeat`
@@ -112,7 +113,8 @@ pub fn matches_api_path(path: &str) -> bool {
     let head = path.split('/').next().unwrap_or(path);
     matches!(
         head,
-        "automations"
+        "app"
+            | "automations"
             | "billing"
             | "binary-download-plan"
             | "bug-reports"
@@ -273,7 +275,8 @@ mod tests {
 
     #[test]
     fn matches_control_plane_paths() {
-        // Confirmed against droid CLI binary v0.127.0.
+        // Confirmed against droid CLI binary v0.131.0.
+        assert!(matches_api_path("app/auth/me"));
         assert!(matches_api_path("sessions"));
         assert!(matches_api_path("cli/whoami"));
         assert!(matches_api_path("cli/org"));
@@ -291,6 +294,8 @@ mod tests {
         assert!(matches_api_path("sessions/abc/git-ai/checkpoints"));
         assert!(matches_api_path("sessions/abc/git-ai/notes"));
         assert!(matches_api_path("sessions/abc/git-ai/pull-requests"));
+        assert!(matches_api_path("sessions/abc/pin"));
+        assert!(matches_api_path("sessions/pinned"));
         assert!(matches_api_path("llm/o/v1/responses"));
         assert!(matches_api_path("llm/a/v1/messages"));
         assert!(matches_api_path("llm/g/v1/generate"));

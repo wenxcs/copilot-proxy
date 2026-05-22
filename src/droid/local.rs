@@ -87,11 +87,23 @@ pub async fn handle_local_api(
             "orgId": state.org_id
         }))
         .into_response()),
+        (&Method::GET, "app/auth/me") => Ok(Json(serde_json::json!({
+            "userId": state.user_id,
+            "orgId": state.org_id,
+            "capabilities": {
+                "canViewAgentEffectivenessReport": true
+            }
+        }))
+        .into_response()),
         (&Method::GET, "cli/org") => Ok(Json(serde_json::json!({
             "workosOrgIds": []
         }))
         .into_response()),
         (&Method::GET, "sessions") => Ok(handle_list_sessions(state)),
+        (&Method::GET, "sessions/pinned") => Ok(Json(serde_json::json!({
+            "sessionIds": []
+        }))
+        .into_response()),
         (&Method::GET, "organization/managed-settings") => Ok(Json(serde_json::json!({
             "success": true,
             "settings": {}
@@ -166,6 +178,7 @@ pub async fn handle_local_api(
             Ok(handle_update_title(state, path, body))
         }
         _ if *method == Method::POST && is_session_write(path) => Ok(ok_response()),
+        _ if *method == Method::DELETE && is_session_pin(path) => Ok(ok_response()),
         (&Method::POST, "integrations/slack/listening-channels/enable")
         | (&Method::PATCH, "integrations/slack/listening-channels/settings") => {
             Ok(Json(serde_json::json!({ "listeningChannels": [] })).into_response())
@@ -392,7 +405,18 @@ fn is_session_write(path: &str) -> bool {
             | "git-ai/checkpoints"
             | "git-ai/notes"
             | "git-ai/pull-requests"
+            | "pin"
     )
+}
+
+fn is_session_pin(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("sessions/") else {
+        return false;
+    };
+    let Some((_id, tail)) = rest.split_once('/') else {
+        return false;
+    };
+    tail == "pin"
 }
 
 fn resolve_factory_home() -> PathBuf {
@@ -587,6 +611,7 @@ mod tests {
         assert!(is_session_write("sessions/abc/git-ai/checkpoints"));
         assert!(is_session_write("sessions/abc/git-ai/notes"));
         assert!(is_session_write("sessions/abc/git-ai/pull-requests"));
+        assert!(is_session_write("sessions/abc/pin"));
     }
 
     #[test]
@@ -605,6 +630,20 @@ mod tests {
         assert_eq!(
             local_json(Method::GET, "cli/org").await,
             serde_json::json!({ "workosOrgIds": [] })
+        );
+        assert_eq!(
+            local_json(Method::GET, "app/auth/me").await,
+            serde_json::json!({
+                "userId": "u",
+                "orgId": "o",
+                "capabilities": {
+                    "canViewAgentEffectivenessReport": true
+                }
+            })
+        );
+        assert_eq!(
+            local_json(Method::GET, "sessions/pinned").await,
+            serde_json::json!({ "sessionIds": [] })
         );
         let billing_limits = local_json(Method::GET, "billing/limits").await;
         assert_eq!(billing_limits["usesTokenRateLimitsBilling"], true);
@@ -702,6 +741,14 @@ mod tests {
 
         assert_eq!(
             local_json(Method::POST, "sessions/abc/git-ai/pull-requests").await,
+            serde_json::json!({ "ok": true })
+        );
+        assert_eq!(
+            local_json(Method::POST, "sessions/abc/pin").await,
+            serde_json::json!({ "ok": true })
+        );
+        assert_eq!(
+            local_json(Method::DELETE, "sessions/abc/pin").await,
             serde_json::json!({ "ok": true })
         );
     }
