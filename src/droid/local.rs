@@ -195,6 +195,12 @@ pub async fn handle_local_api(
         {
             Ok(ok_response())
         }
+        _ if *method == Method::POST
+            && path.starts_with("automations/")
+            && path.ends_with("/runs/failure") =>
+        {
+            Ok(ok_response())
+        }
         (&Method::POST, "bug-reports") => Ok(Json(serde_json::json!({
             "bugReportId": format!("local-{}", uuid::Uuid::new_v4())
         }))
@@ -717,6 +723,10 @@ mod tests {
         assert_eq!(
             local_json(Method::POST, "automations/sync").await,
             serde_json::json!({ "synced": 0, "collisions": [] })
+        );
+        assert_eq!(
+            local_json(Method::POST, "automations/auto-1/runs/failure").await,
+            serde_json::json!({ "ok": true })
         );
         assert_eq!(
             local_json_with_body(

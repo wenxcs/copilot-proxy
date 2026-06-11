@@ -85,7 +85,7 @@ impl DroidManagementProxy {
 /// `--droid-local`). It must NEVER fall through to the Amp branch and hit
 /// `ampcode.com`.
 ///
-/// Inventory verified against the `droid` CLI binary (v0.131.0):
+/// Inventory verified against the `droid` CLI binary (v0.144.2):
 ///   - `app/auth/me`
 ///   - `cli/whoami`, `cli/org`
 ///   - `feature-flags`
@@ -104,7 +104,8 @@ impl DroidManagementProxy {
 ///   - `integrations/org/check`, `integrations/scm/repositories`, `integrations/slack/*`
 ///   - `tools/web-search`, `tools/get-url-contents`, `tools/slack/post-message`
 ///   - `v0/computers[...]`, `v0/automations[...]`
-///   - `automations/sync`, `automations/{id}/visual`
+///   - `automations/sync`, `automations/{id}/visual`,
+///     `automations/{id}/runs/failure`
 ///   - `billing/limits`
 ///   - `bug-reports`
 ///   - `binary-download-plan`
