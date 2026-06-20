@@ -99,6 +99,9 @@ pub async fn handle_local_api(
             "workosOrgIds": []
         }))
         .into_response()),
+        (&Method::GET, "connectors/list") | (&Method::POST, "connectors/list") => {
+            Ok(Json(serde_json::json!({ "connectors": [] })).into_response())
+        }
         (&Method::GET, "sessions") => Ok(handle_list_sessions(state)),
         (&Method::GET, "sessions/pinned") => Ok(Json(serde_json::json!({
             "sessionIds": []
@@ -177,6 +180,9 @@ pub async fn handle_local_api(
         _ if *method == Method::POST && path.ends_with("/update-title") => {
             Ok(handle_update_title(state, path, body))
         }
+        _ if *method == Method::POST && path.ends_with("/mission/metadata") => {
+            Ok(handle_mission_metadata(path, body))
+        }
         _ if *method == Method::POST && is_session_write(path) => Ok(ok_response()),
         _ if *method == Method::DELETE && is_session_pin(path) => Ok(ok_response()),
         (&Method::POST, "integrations/slack/listening-channels/enable")
@@ -184,6 +190,20 @@ pub async fn handle_local_api(
             Ok(Json(serde_json::json!({ "listeningChannels": [] })).into_response())
         }
         (&Method::POST, "organization/subscription/set-overage-preference") => Ok(ok_response()),
+        (&Method::POST, "connectors/link") => Ok(Json(serde_json::json!({
+            "ok": false,
+            "error": "Connectors are unavailable in --droid-local"
+        }))
+        .into_response()),
+        (&Method::POST, "connectors/disconnect") => Ok(ok_response()),
+        (&Method::POST, "connectors/tools/list") => {
+            Ok(Json(serde_json::json!({ "tools": [] })).into_response())
+        }
+        (&Method::POST, "connectors/tools/call") => Ok(Json(serde_json::json!({
+            "status": "success",
+            "content": "Connectors are unavailable in --droid-local"
+        }))
+        .into_response()),
         (&Method::POST, "automations/sync") => Ok(Json(serde_json::json!({
             "synced": 0,
             "collisions": []
@@ -212,6 +232,13 @@ pub async fn handle_local_api(
             "errorType": "externalAPIError",
             "llmError": "Slack integration is unavailable in --droid-local",
             "userError": "Slack integration is unavailable in local mode"
+        }))
+        .into_response()),
+        (&Method::POST, "tools/slack/post-file") => Ok(Json(serde_json::json!({
+            "isError": true,
+            "errorType": "externalAPIError",
+            "llmError": "Slack file upload is unavailable in --droid-local",
+            "userError": "Slack file upload is unavailable in local mode"
         }))
         .into_response()),
 
@@ -391,6 +418,30 @@ fn handle_update_title(state: &LocalDroidState, path: &str, body: &Bytes) -> Res
     }
 }
 
+fn handle_mission_metadata(path: &str, body: &Bytes) -> Response {
+    if path
+        .strip_prefix("sessions/")
+        .and_then(|rest| rest.strip_suffix("/mission/metadata"))
+        .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+        .is_none()
+    {
+        return invalid_local_request(
+            "/api/sessions/{id}/mission/metadata",
+            "invalid session mission metadata path",
+        );
+    }
+
+    let value = parse_json_body(body);
+    if !value.is_object() || value.get("mission").is_none() {
+        return invalid_local_request(
+            "/api/sessions/{id}/mission/metadata",
+            "missing mission in mission metadata body",
+        );
+    }
+
+    ok_response()
+}
+
 fn is_session_write(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("sessions/") else {
         return false;
@@ -411,6 +462,7 @@ fn is_session_write(path: &str) -> bool {
             | "git-ai/checkpoints"
             | "git-ai/notes"
             | "git-ai/pull-requests"
+            | "mission/metadata"
             | "pin"
     )
 }
@@ -563,8 +615,8 @@ fn not_implemented(method: &Method, path: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        LocalDroidState, apply_title_update, extract_title, handle_local_api, is_session_write,
-        read_sessions_index,
+        LocalDroidState, apply_title_update, extract_title, handle_local_api,
+        handle_mission_metadata, is_session_write, read_sessions_index,
     };
     use axum::body::{Bytes, to_bytes};
     use axum::http::{Method, StatusCode};
@@ -617,6 +669,7 @@ mod tests {
         assert!(is_session_write("sessions/abc/git-ai/checkpoints"));
         assert!(is_session_write("sessions/abc/git-ai/notes"));
         assert!(is_session_write("sessions/abc/git-ai/pull-requests"));
+        assert!(is_session_write("sessions/abc/mission/metadata"));
         assert!(is_session_write("sessions/abc/pin"));
     }
 
@@ -650,6 +703,21 @@ mod tests {
         assert_eq!(
             local_json(Method::GET, "sessions/pinned").await,
             serde_json::json!({ "sessionIds": [] })
+        );
+        assert_eq!(
+            local_json(Method::GET, "connectors/list").await,
+            serde_json::json!({ "connectors": [] })
+        );
+        assert_eq!(
+            local_json(Method::POST, "connectors/tools/list").await,
+            serde_json::json!({ "tools": [] })
+        );
+        assert_eq!(
+            local_json(Method::POST, "connectors/tools/call").await,
+            serde_json::json!({
+                "status": "success",
+                "content": "Connectors are unavailable in --droid-local"
+            })
         );
         let billing_limits = local_json(Method::GET, "billing/limits").await;
         assert_eq!(billing_limits["usesTokenRateLimitsBilling"], true);
@@ -749,8 +817,20 @@ mod tests {
         let slack_post = local_json(Method::POST, "tools/slack/post-message").await;
         assert_eq!(slack_post["isError"], true);
 
+        let slack_post_file = local_json(Method::POST, "tools/slack/post-file").await;
+        assert_eq!(slack_post_file["isError"], true);
+
         assert_eq!(
             local_json(Method::POST, "sessions/abc/git-ai/pull-requests").await,
+            serde_json::json!({ "ok": true })
+        );
+        assert_eq!(
+            local_json_with_body(
+                Method::POST,
+                "sessions/abc/mission/metadata",
+                Bytes::from_static(br#"{"mission":{"features":[]},"syncMode":"backfill"}"#)
+            )
+            .await,
             serde_json::json!({ "ok": true })
         );
         assert_eq!(
@@ -813,6 +893,21 @@ mod tests {
 
         let title = extract_title(&Bytes::from_static(br#"{"sessionTitle":"Renamed"}"#));
         assert_eq!(title.as_deref(), Some("Renamed"));
+    }
+
+    #[tokio::test]
+    async fn validates_mission_metadata_body_shape() {
+        let ok = handle_mission_metadata(
+            "sessions/abc/mission/metadata",
+            &Bytes::from_static(br#"{"mission":{"features":[]}}"#),
+        );
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        let missing_mission = handle_mission_metadata(
+            "sessions/abc/mission/metadata",
+            &Bytes::from_static(br#"{"syncMode":"backfill"}"#),
+        );
+        assert_eq!(missing_mission.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]

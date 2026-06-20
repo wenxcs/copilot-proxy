@@ -85,9 +85,11 @@ impl DroidManagementProxy {
 /// `--droid-local`). It must NEVER fall through to the Amp branch and hit
 /// `ampcode.com`.
 ///
-/// Inventory verified against the `droid` CLI binary (v0.144.2):
+/// Inventory verified against the `droid` CLI binary (v0.153.1):
 ///   - `app/auth/me`
 ///   - `cli/whoami`, `cli/org`
+///   - `connectors/list`, `connectors/link`, `connectors/disconnect`,
+///     `connectors/tools/list`, `connectors/tools/call`
 ///   - `feature-flags`
 ///   - `organization/managed-settings`, `organization/agent-readiness-reports`,
 ///     `organization/subscription/set-overage-preference`,
@@ -95,15 +97,16 @@ impl DroidManagementProxy {
 ///   - `sessions/create`, `sessions/{id}` and its subpaths
 ///     (`update-settings`, `update-title`, `message/create`, `droid-status`,
 ///     `archive`, `unarchive`, `privacy`, `git-ai/checkpoints`, `git-ai/notes`,
-///     `git-ai/pull-requests`, `pin`), `sessions/pinned`
+///     `git-ai/pull-requests`, `mission/metadata`, `pin`), `sessions/pinned`
 ///   - `llm/o/v1/*`, `llm/a/v1/*`, `llm/g/v1/generate`,
 ///     `llm/custom/usage`, `llm/failed-requests`
 ///   - `daemon/heartbeat`
 ///   - `hello`
 ///   - `ingest`, `otlp/traces/ingest`         (telemetry; note: NOT under `/api/telemetry/`)
 ///   - `integrations/org/check`, `integrations/scm/repositories`, `integrations/slack/*`
-///   - `tools/web-search`, `tools/get-url-contents`, `tools/slack/post-message`
-///   - `v0/computers[...]`, `v0/automations[...]`
+///   - `tools/web-search`, `tools/get-url-contents`, `tools/slack/post-message`,
+///     `tools/slack/post-file`
+///   - `v0/computers[...]`, `v0/automations[...]`, `v0/act-as-grants/verify`
 ///   - `automations/sync`, `automations/{id}/visual`,
 ///     `automations/{id}/runs/failure`
 ///   - `billing/limits`
@@ -120,6 +123,7 @@ pub fn matches_api_path(path: &str) -> bool {
             | "binary-download-plan"
             | "bug-reports"
             | "cli"
+            | "connectors"
             | "feature-flags"
             | "organization"
             | "sessions"
@@ -276,11 +280,16 @@ mod tests {
 
     #[test]
     fn matches_control_plane_paths() {
-        // Confirmed against droid CLI binary v0.131.0.
+        // Confirmed against droid CLI binary v0.153.1.
         assert!(matches_api_path("app/auth/me"));
         assert!(matches_api_path("sessions"));
         assert!(matches_api_path("cli/whoami"));
         assert!(matches_api_path("cli/org"));
+        assert!(matches_api_path("connectors/list"));
+        assert!(matches_api_path("connectors/link"));
+        assert!(matches_api_path("connectors/disconnect"));
+        assert!(matches_api_path("connectors/tools/list"));
+        assert!(matches_api_path("connectors/tools/call"));
         assert!(matches_api_path("feature-flags"));
         assert!(matches_api_path("organization/managed-settings"));
         assert!(matches_api_path("organization/agent-readiness-reports"));
@@ -295,6 +304,7 @@ mod tests {
         assert!(matches_api_path("sessions/abc/git-ai/checkpoints"));
         assert!(matches_api_path("sessions/abc/git-ai/notes"));
         assert!(matches_api_path("sessions/abc/git-ai/pull-requests"));
+        assert!(matches_api_path("sessions/abc/mission/metadata"));
         assert!(matches_api_path("sessions/abc/pin"));
         assert!(matches_api_path("sessions/pinned"));
         assert!(matches_api_path("llm/o/v1/responses"));
@@ -310,8 +320,10 @@ mod tests {
         assert!(matches_api_path("integrations/scm/repositories"));
         assert!(matches_api_path("integrations/slack/channels"));
         assert!(matches_api_path("tools/web-search"));
+        assert!(matches_api_path("tools/slack/post-file"));
         assert!(matches_api_path("v0/computers"));
         assert!(matches_api_path("v0/automations"));
+        assert!(matches_api_path("v0/act-as-grants/verify"));
         assert!(matches_api_path("automations/sync"));
         assert!(matches_api_path("automations/abc/visual"));
         assert!(matches_api_path("billing/limits"));
