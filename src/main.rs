@@ -60,6 +60,9 @@ enum Commands {
 enum ServiceAction {
     /// Install the service daemon
     Install {
+        /// IP address / host the service should bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
         #[arg(short, long, default_value = "9876")]
         port: u16,
     },
@@ -96,7 +99,7 @@ async fn main() -> Result<()> {
             .await
         }
         Commands::Service { action } => match action {
-            ServiceAction::Install { port } => install_service(port),
+            ServiceAction::Install { host, port } => install_service(&host, port),
             ServiceAction::Uninstall => uninstall_service(),
         },
     }
@@ -169,13 +172,15 @@ fn init_tracing(default_filter: &str) {
 
 const SERVICE_LABEL: &str = "me.messense.copilot-api-proxy";
 
-fn install_service(port: u16) -> Result<()> {
+fn install_service(host: &str, port: u16) -> Result<()> {
     let label: ServiceLabel = SERVICE_LABEL.parse()?;
     let mut manager = <dyn ServiceManager>::native()?;
 
     let program = std::env::current_exe()?;
     let args = vec![
         OsString::from("server"),
+        OsString::from("--host"),
+        OsString::from(host),
         OsString::from("--port"),
         OsString::from(port.to_string()),
     ];
@@ -196,6 +201,7 @@ fn install_service(port: u16) -> Result<()> {
     })?;
 
     println!("Service installed successfully as '{}'", SERVICE_LABEL);
+    println!("The service will listen on http://{}:{}", host, port);
     println!("The service will start automatically on system boot.");
     println!("\nTo start the service now, run:");
     #[cfg(target_os = "macos")]

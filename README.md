@@ -194,6 +194,9 @@ copilot-api-proxy service install
 # Install with custom port
 copilot-api-proxy service install --port 8080
 
+# Install with a custom endpoint IP / host and port
+copilot-api-proxy service install --host 0.0.0.0 --port 8080
+
 # Uninstall the service
 copilot-api-proxy service uninstall
 ```

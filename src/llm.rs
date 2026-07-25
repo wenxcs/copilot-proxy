@@ -68,6 +68,33 @@ const ANTHROPIC_MODEL_ALIASES: &[(&str, &str)] = &[
     ("claude-opus-4-6", "claude-opus-4-7"),
 ];
 
+/// Fallback upstream models used when a client requests a native Claude model
+/// name (e.g. the dated Anthropic public IDs like `claude-sonnet-4-20250514`)
+/// that Copilot upstream does not expose. Overridable via the `SMALL_MODEL`,
+/// `MIDDLE_MODEL`, and `BIG_MODEL` environment variables.
+const DEFAULT_SMALL_MODEL: &str = "claude-haiku-4.5";
+const DEFAULT_MIDDLE_MODEL: &str = "claude-sonnet-5";
+const DEFAULT_BIG_MODEL: &str = "claude-opus-5";
+
+/// Pick the configured fallback upstream model for a native Claude request,
+/// based on its family (haiku/sonnet/opus). Bare `claude-*` names without a
+/// recognizable family fall back to the middle (sonnet) tier.
+fn family_default_model(model: &str) -> Option<String> {
+    let lower = model.to_lowercase();
+    let target = if lower.contains("haiku") {
+        std::env::var("SMALL_MODEL").unwrap_or_else(|_| DEFAULT_SMALL_MODEL.to_string())
+    } else if lower.contains("opus") {
+        std::env::var("BIG_MODEL").unwrap_or_else(|_| DEFAULT_BIG_MODEL.to_string())
+    } else if lower.contains("sonnet") {
+        std::env::var("MIDDLE_MODEL").unwrap_or_else(|_| DEFAULT_MIDDLE_MODEL.to_string())
+    } else if lower.contains("claude") {
+        std::env::var("MIDDLE_MODEL").unwrap_or_else(|_| DEFAULT_MIDDLE_MODEL.to_string())
+    } else {
+        return None;
+    };
+    Some(target)
+}
+
 /// Convert `budget_tokens` to a Copilot `output_config.effort` string.
 fn budget_tokens_to_effort(budget_tokens: u64) -> &'static str {
     if budget_tokens < 4_000 {
@@ -262,6 +289,7 @@ fn needs_supported_reasoning_effort_lookup(body: &[u8]) -> bool {
 }
 
 async fn remap_anthropic_model_for_copilot(state: &AppState, body: Bytes) -> Bytes {
+    let body = normalize_unsupported_native_claude_model(state, body).await;
     let supported_reasoning_efforts = if needs_supported_reasoning_effort_lookup(&body) {
         if let Some(model) = remapped_anthropic_model_name(&body) {
             match state.proxy.supported_reasoning_efforts(&model).await {
@@ -283,6 +311,50 @@ async fn remap_anthropic_model_for_copilot(state: &AppState, body: Bytes) -> Byt
         None
     };
     remap_anthropic_model(body, supported_reasoning_efforts.as_deref())
+}
+
+/// Rewrite the `model` field when a client requests a native Claude model that
+/// Copilot upstream does not expose (e.g. the dated Anthropic public IDs such
+/// as `claude-sonnet-4-20250514`). The request is remapped to the configured
+/// fallback model for its family so it succeeds instead of returning
+/// `model_not_supported`. Requests that already name a supported upstream model
+/// are left untouched.
+async fn normalize_unsupported_native_claude_model(state: &AppState, body: Bytes) -> Bytes {
+    let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    let model = match value.get("model").and_then(|v| v.as_str()) {
+        Some(model) => model.to_string(),
+        None => return body,
+    };
+    if !is_native_claude_model(&model) {
+        return body;
+    }
+    // Only remap when the model list was fetched and does NOT contain the
+    // requested model. Unknown (fetch failed) leaves the request untouched.
+    if state.proxy.is_supported_model(&model).await != Some(false) {
+        return body;
+    }
+    let Some(target) = family_default_model(&model) else {
+        return body;
+    };
+    if target == model {
+        return body;
+    }
+    tracing::debug!(
+        target: "llm",
+        requested_model = %model,
+        mapped_model = %target,
+        "remapping unsupported native Claude model to a supported upstream model"
+    );
+    let Some(obj) = value.as_object_mut() else {
+        return body;
+    };
+    obj.insert("model".to_string(), Value::String(target));
+    match serde_json::to_vec(&value) {
+        Ok(bytes) => Bytes::from(bytes),
+        Err(_) => body,
+    }
 }
 
 pub async fn handle_anthropic_compat(
@@ -562,5 +634,34 @@ mod tests {
         let body = serde_json::to_vec(&value).unwrap();
 
         assert!(needs_supported_reasoning_effort_lookup(&body));
+    }
+
+    #[test]
+    fn family_default_model_maps_dated_anthropic_names_by_family() {
+        assert_eq!(
+            family_default_model("claude-3-5-haiku-20241022").as_deref(),
+            Some("claude-haiku-4.5")
+        );
+        assert_eq!(
+            family_default_model("claude-sonnet-4-20250514").as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(
+            family_default_model("claude-opus-4-20250514").as_deref(),
+            Some("claude-opus-5")
+        );
+    }
+
+    #[test]
+    fn family_default_model_falls_back_to_middle_for_bare_claude_names() {
+        assert_eq!(
+            family_default_model("claude-2.1").as_deref(),
+            Some("claude-sonnet-5")
+        );
+    }
+
+    #[test]
+    fn family_default_model_ignores_non_claude_models() {
+        assert_eq!(family_default_model("gpt-4o"), None);
     }
 }

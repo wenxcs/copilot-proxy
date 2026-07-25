@@ -245,6 +245,14 @@ Everything else remains generic passthrough.
 
 When the request model is a native Claude model (name contains `claude`, `sonnet`, `haiku`, or `opus`), both `/v1/messages` and `/v1/messages/count_tokens` forward the Anthropic request directly to Copilot's corresponding `/v1/messages` endpoint without any OpenAI conversion. Initiator and vision flags are still inferred from the Anthropic message history.
 
+Before forwarding, native Claude requests are normalized so a client can use the standard dated Anthropic public IDs (e.g. `claude-sonnet-4-20250514`, `claude-3-5-haiku-20241022`) even though Copilot upstream exposes dotted IDs like `claude-sonnet-5`. `remap_anthropic_model_for_copilot` (in `src/llm.rs`) fetches the upstream `/models` list (cached in `src/proxy.rs`) and, only when the requested model is confirmed absent, rewrites `model` to the configured fallback for its family:
+
+- `haiku` -> `SMALL_MODEL` (default `claude-haiku-4.5`)
+- `sonnet` (and bare `claude-*` names) -> `MIDDLE_MODEL` (default `claude-sonnet-5`)
+- `opus` -> `BIG_MODEL` (default `claude-opus-5`)
+
+Requests that already name a supported upstream model are left untouched, and if the model list cannot be fetched the request is forwarded unchanged. The small `ANTHROPIC_MODEL_ALIASES` table still applies afterward for explicit version bumps (e.g. `opus-4.6` -> `opus-4.7`).
+
 For non-Claude models, the full translation layer applies:
 
 1. Optionally checks `ANTHROPIC_API_KEY`
@@ -253,7 +261,7 @@ For non-Claude models, the full translation layer applies:
 4. Sends the converted request to Copilot `/chat/completions`
 5. Converts the OpenAI response back into Anthropic format, including SSE streaming
 
-Anthropic model aliases are mapped by substring:
+On the non-native conversion path, Anthropic model aliases are mapped by substring:
 
 - `haiku` -> `SMALL_MODEL`
 - `sonnet` -> `MIDDLE_MODEL`

@@ -7,7 +7,7 @@ use axum::response::Response;
 use futures::TryStreamExt;
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -29,6 +29,7 @@ const MODELS_UNKNOWN_REFRESH_TTL: Duration = Duration::from_secs(5 * 60);
 struct ModelsCache {
     fetched_at: Instant,
     reasoning_efforts_by_model: HashMap<String, Vec<String>>,
+    model_ids: HashSet<String>,
 }
 
 pub struct ProxyClient {
@@ -148,15 +149,40 @@ impl ProxyClient {
             return Ok(efforts);
         }
 
-        let reasoning_efforts_by_model = self.fetch_model_reasoning_efforts().await?;
+        let (reasoning_efforts_by_model, model_ids) = self.fetch_models_data().await?;
         let efforts = keys
             .iter()
             .find_map(|key| reasoning_efforts_by_model.get(key).cloned());
         *self.models_cache.write().await = Some(ModelsCache {
             fetched_at: Instant::now(),
             reasoning_efforts_by_model,
+            model_ids,
         });
         Ok(efforts)
+    }
+
+    /// Returns `Some(true)` when Copilot upstream is known to expose `model`,
+    /// `Some(false)` when the model list was fetched but does not contain it,
+    /// and `None` when the model list could not be determined.
+    pub async fn is_supported_model(&self, model: &str) -> Option<bool> {
+        let keys = model_lookup_keys(model);
+        {
+            let cache = self.models_cache.read().await;
+            if let Some(cache) = cache.as_ref()
+                && cache.fetched_at.elapsed() <= MODELS_CACHE_TTL
+            {
+                return Some(keys.iter().any(|key| cache.model_ids.contains(key)));
+            }
+        }
+
+        let (reasoning_efforts_by_model, model_ids) = self.fetch_models_data().await.ok()?;
+        let supported = keys.iter().any(|key| model_ids.contains(key));
+        *self.models_cache.write().await = Some(ModelsCache {
+            fetched_at: Instant::now(),
+            reasoning_efforts_by_model,
+            model_ids,
+        });
+        Some(supported)
     }
 
     async fn cached_reasoning_efforts(&self, keys: &[String]) -> Option<Option<Vec<String>>> {
@@ -165,7 +191,9 @@ impl ProxyClient {
         cached_reasoning_efforts_from_cache(cache, keys)
     }
 
-    async fn fetch_model_reasoning_efforts(&self) -> Result<HashMap<String, Vec<String>>, Error> {
+    async fn fetch_models_data(
+        &self,
+    ) -> Result<(HashMap<String, Vec<String>>, HashSet<String>), Error> {
         let resp = self
             .forward_inner(
                 "/models",
@@ -186,11 +214,20 @@ impl ProxyClient {
 
         let value: serde_json::Value = resp.json().await?;
         let mut map = HashMap::new();
+        let mut ids = HashSet::new();
         let Some(models) = value.get("data").and_then(|v| v.as_array()) else {
-            return Ok(map);
+            return Ok((map, ids));
         };
 
         for model in models {
+            for pointer in ["/id", "/version", "/capabilities/family"] {
+                if let Some(key) = model.pointer(pointer).and_then(|v| v.as_str()) {
+                    for key in model_lookup_keys(key) {
+                        ids.insert(key);
+                    }
+                }
+            }
+
             let Some(efforts) = model
                 .pointer("/capabilities/supports/reasoning_effort")
                 .and_then(|v| v.as_array())
@@ -214,7 +251,7 @@ impl ProxyClient {
             }
         }
 
-        Ok(map)
+        Ok((map, ids))
     }
 
     async fn send_request(
@@ -426,6 +463,7 @@ mod tests {
         let cache = ModelsCache {
             fetched_at: Instant::now(),
             reasoning_efforts_by_model: HashMap::new(),
+            model_ids: HashSet::new(),
         };
         let keys = vec!["brand-new-model".to_string()];
 
@@ -440,6 +478,7 @@ mod tests {
         let cache = ModelsCache {
             fetched_at: Instant::now() - MODELS_UNKNOWN_REFRESH_TTL - Duration::from_secs(1),
             reasoning_efforts_by_model: HashMap::new(),
+            model_ids: HashSet::new(),
         };
         let keys = vec!["brand-new-model".to_string()];
 
