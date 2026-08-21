@@ -24,7 +24,7 @@ enum Commands {
     Auth,
     /// Start the proxy server
     Server {
-        #[arg(long, default_value = "127.0.0.1")]
+        #[arg(long, default_value = "0.0.0.0")]
         host: String,
         #[arg(short, long, default_value = "9876")]
         port: u16,
@@ -61,7 +61,7 @@ enum ServiceAction {
     /// Install the service daemon
     Install {
         /// IP address / host the service should bind to
-        #[arg(long, default_value = "127.0.0.1")]
+        #[arg(long, default_value = "0.0.0.0")]
         host: String,
         #[arg(short, long, default_value = "9876")]
         port: u16,
