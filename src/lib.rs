@@ -7,7 +7,6 @@ pub mod claude;
 pub mod config;
 pub mod droid;
 pub mod error;
-pub mod gemini;
 pub mod initiator;
 pub mod llm;
 pub mod proxy;

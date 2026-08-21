@@ -60,9 +60,7 @@ impl LocalDroidState {
                         "gpt-5.4": ["openai"],
                         "gpt-5.4-mini": ["openai"],
                         "gpt-5.3-codex": ["openai"],
-                        "gpt-5.2": ["openai"],
-                        "gemini-3.1-pro-preview": ["google"],
-                        "gemini-3-flash-preview": ["google"]
+                        "gpt-5.2": ["openai"]
                     }
                 }
             }
@@ -728,6 +726,19 @@ mod tests {
         );
         let feature_flags = local_json(Method::GET, "feature-flags").await;
         assert_eq!(feature_flags["flags"]["mission_ui_entrypoints"], true);
+        let provider_routing = &feature_flags["configs"]["provider_routing"];
+        assert!(provider_routing["defaults"].get("google").is_none());
+        let advertised_models = provider_routing["models"].as_object().unwrap();
+        assert!(
+            !advertised_models
+                .keys()
+                .any(|model| model.starts_with("gemini-"))
+        );
+        assert!(advertised_models.values().all(|providers| {
+            providers
+                .as_array()
+                .is_some_and(|providers| providers.iter().all(|provider| provider != "google"))
+        }));
         assert_eq!(
             local_json(Method::GET, "organization/agent-readiness-reports").await,
             serde_json::json!({

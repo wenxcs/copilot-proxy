@@ -13,7 +13,6 @@ use crate::claude::{
     analyze_claude_request, convert_claude_request, convert_openai_response, error_from_proxy,
 };
 use crate::error::Error;
-use crate::gemini::{handle_gemini_count_tokens, parse_gemini_action};
 use crate::llm;
 use crate::proxy::forward_response;
 use crate::server::AppState;
@@ -374,6 +373,23 @@ async fn management_handler(
         .await
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ProviderRoute {
+    OpenAi,
+    Anthropic,
+    Removed,
+    Upstream,
+}
+
+fn classify_provider(provider: &str) -> ProviderRoute {
+    match provider.to_ascii_lowercase().as_str() {
+        "openai" => ProviderRoute::OpenAi,
+        "anthropic" => ProviderRoute::Anthropic,
+        "google" => ProviderRoute::Removed,
+        _ => ProviderRoute::Upstream,
+    }
+}
+
 /// Route a provider request to the appropriate local handler or ampcode.com.
 async fn handle_provider(
     state: AppState,
@@ -391,11 +407,13 @@ async fn handle_provider(
         .or_else(|| path.strip_prefix("v1beta1/"))
         .unwrap_or(path);
 
-    match provider.to_lowercase().as_str() {
-        "openai" => handle_openai(state, method, api_path, uri, headers, body).await,
-        "anthropic" => handle_anthropic(state, method, api_path, uri, headers, body).await,
-        "google" => handle_google(state, method, api_path, uri, headers, body).await,
-        _ => {
+    match classify_provider(provider) {
+        ProviderRoute::OpenAi => handle_openai(state, method, api_path, uri, headers, body).await,
+        ProviderRoute::Anthropic => {
+            handle_anthropic(state, method, api_path, uri, headers, body).await
+        }
+        ProviderRoute::Removed => Ok(unsupported_provider_response(&method, uri, provider)),
+        ProviderRoute::Upstream => {
             let pq = uri
                 .path_and_query()
                 .map(|pq| pq.as_str())
@@ -415,6 +433,32 @@ async fn handle_provider(
                 .await
         }
     }
+}
+
+fn unsupported_provider_response(method: &Method, uri: &Uri, provider: &str) -> Response {
+    let path = uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or(uri.path());
+    tracing::warn!(
+        target: "amp_proxy",
+        method = %method,
+        path = %path,
+        provider = %provider,
+        "Amp provider is not supported"
+    );
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "error": {
+                "message": format!("Amp provider '{provider}' is not supported"),
+                "type": "provider_not_supported",
+                "path": path,
+                "method": method.as_str()
+            }
+        })),
+    )
+        .into_response()
 }
 
 /// Handle OpenAI provider requests via Copilot proxy.
@@ -479,73 +523,6 @@ async fn handle_anthropic(
     llm::handle_anthropic_compat(&state, method, api_path, uri.query(), &headers, body, false).await
 }
 
-/// Handle Google/Gemini provider requests: convert Gemini native API to OpenAI,
-/// forward via Copilot, convert response back to Gemini format.
-async fn handle_google(
-    state: AppState,
-    method: Method,
-    api_path: &str,
-    uri: &Uri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, Error> {
-    // generateContent / streamGenerateContent
-    if let Some((model, action)) = parse_gemini_action(api_path) {
-        match action {
-            "generateContent" | "streamGenerateContent" => {
-                let stream = action == "streamGenerateContent";
-                llm::handle_gemini_generate_content(
-                    &state,
-                    method,
-                    model,
-                    uri.query(),
-                    body,
-                    stream,
-                )
-                .await
-            }
-            "countTokens" => handle_gemini_count_tokens(model, body).await,
-            _ => {
-                let pq = uri
-                    .path_and_query()
-                    .map(|pq| pq.as_str())
-                    .unwrap_or(uri.path());
-                if state.amp_local.is_some() {
-                    return Ok(amp_local_fallback_response(
-                        &method,
-                        pq,
-                        format!("unsupported Gemini action '{action}'"),
-                    ));
-                }
-
-                // Unknown action — forward to ampcode.com
-                state
-                    .amp_management
-                    .forward(method, pq, headers, body)
-                    .await
-            }
-        }
-    } else {
-        let pq = uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or(uri.path());
-        if state.amp_local.is_some() {
-            return Ok(amp_local_fallback_response(
-                &method,
-                pq,
-                "Gemini route did not match a supported local action",
-            ));
-        }
-
-        // Models listing, model info, etc. — forward to ampcode.com
-        state
-            .amp_management
-            .forward(method, pq, headers, body)
-            .await
-    }
-}
-
 /// Rewrite the "model" field in a JSON request body.
 fn rewrite_model_in_body(body: &Bytes, new_model: &str) -> Bytes {
     if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body)
@@ -560,4 +537,31 @@ fn rewrite_model_in_body(body: &Bytes, new_model: &str) -> Bytes {
         }
     }
     body.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProviderRoute, classify_provider, unsupported_provider_response};
+    use axum::body::to_bytes;
+    use axum::http::{Method, StatusCode, Uri};
+
+    #[tokio::test]
+    async fn google_provider_is_rejected_locally() {
+        assert_eq!(classify_provider("google"), ProviderRoute::Removed);
+        assert_eq!(classify_provider("GoOgLe"), ProviderRoute::Removed);
+
+        let uri: Uri = "/api/provider/google/v1beta/models/example:generateContent?alt=sse"
+            .parse()
+            .unwrap();
+        let response = unsupported_provider_response(&Method::POST, &uri, "google");
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["type"], "provider_not_supported");
+        assert_eq!(
+            value["error"]["path"],
+            "/api/provider/google/v1beta/models/example:generateContent?alt=sse"
+        );
+    }
 }

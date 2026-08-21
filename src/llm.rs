@@ -6,7 +6,6 @@ use crate::claude::{
     validate_anthropic_headers,
 };
 use crate::error::Error;
-use crate::gemini::{convert_gemini_request, convert_openai_to_gemini_response};
 use crate::initiator::{
     RequestAnalysis, analyze_openai_chat_completions, analyze_openai_responses,
 };
@@ -473,50 +472,6 @@ pub async fn handle_anthropic_compat(
             .await
         }
     }
-}
-
-pub async fn handle_gemini_generate_content(
-    state: &AppState,
-    method: Method,
-    model: &str,
-    query: Option<&str>,
-    body: Bytes,
-    stream: bool,
-) -> Result<Response, Error> {
-    let query = query.map(|q| format!("?{}", q)).unwrap_or_default();
-    let converted = match convert_gemini_request(model, body, stream) {
-        Ok(c) => c,
-        Err(e) => return Ok(error_from_proxy(e)),
-    };
-    let resp = match state
-        .proxy
-        .forward(
-            &format!("/chat/completions{}", query),
-            method,
-            converted.body,
-            Some("application/json"),
-            Some(converted.initiator),
-            converted.is_vision,
-        )
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => return Ok(error_from_proxy(e)),
-    };
-    match convert_openai_to_gemini_response(resp, converted.model, converted.stream).await {
-        Ok(r) => Ok(r),
-        Err(e) => Ok(error_from_proxy(e)),
-    }
-}
-
-pub fn extract_model_field(body: &[u8]) -> Result<String, Error> {
-    let value: Value = serde_json::from_slice(body)
-        .map_err(|e| Error::InvalidRequest(format!("Invalid JSON body: {e}")))?;
-    value
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string)
-        .ok_or_else(|| Error::InvalidRequest("Missing required field: model".to_string()))
 }
 
 #[cfg(test)]

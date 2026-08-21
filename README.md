@@ -1,6 +1,6 @@
 # copilot-api-proxy
 
-A reverse proxy for GitHub Copilot that exposes OpenAI-compatible `/v1/*` routes, an Anthropic-compatible `/v1/messages` surface with native Claude model passthrough, Amp provider and management routes, and Droid LLM routes that can be backed by Copilot while forwarding Factory control-plane traffic upstream by default. OpenAI requests are forwarded mostly unchanged; native Claude models on Anthropic routes are forwarded directly while non-Claude Anthropic and Gemini compatibility routes translate to Copilot's OpenAI-style upstream. Optional `--amp-local` and `--droid-local` modes serve supported management APIs locally with strict fallback blocking for unsupported upstream routes.
+A reverse proxy for GitHub Copilot that exposes OpenAI-compatible `/v1/*` routes, an Anthropic-compatible `/v1/messages` surface with native Claude model passthrough, Amp provider and management routes, and Droid LLM routes that can be backed by Copilot while forwarding Factory control-plane traffic upstream by default. OpenAI requests are forwarded mostly unchanged; native Claude models on Anthropic routes are forwarded directly while non-Claude Anthropic compatibility requests translate to Copilot's OpenAI-style upstream. Optional `--amp-local` and `--droid-local` modes serve supported management APIs locally with strict fallback blocking for unsupported upstream routes.
 
 > [!WARNING]
 > This is a reverse-engineered proxy of GitHub Copilot API. It is not supported by GitHub, and may break unexpectedly. Use at your own risk.
@@ -23,8 +23,8 @@ A reverse proxy for GitHub Copilot that exposes OpenAI-compatible `/v1/*` routes
 
 - OpenAI-compatible passthrough on `/v1/*`
 - Anthropic-compatible `/v1/messages` and `/v1/messages/count_tokens` with native Claude model passthrough
-- Amp provider routes for OpenAI, Anthropic, and Gemini clients
-- Droid LLM routes for OpenAI Responses, Anthropic Messages, and Gemini generateContent-compatible requests
+- Amp provider routes for OpenAI and Anthropic clients
+- Droid LLM routes for OpenAI Responses and Anthropic Messages
 - Amp management proxy by default for `/api/*` and RSS routes, plus browser redirects for `/threads*`, `/auth*`, `/docs*`, and `/settings*`
 - Factory control-plane proxy by default for Droid `/api/cli/*`, `/api/organization/*`, `/api/sessions/*`, and telemetry routes
 - Optional `--amp-local` mode for local `/api/threads/*`, `/api/internal`, telemetry, labels, and user info endpoints, with strict fallback blocking for unsupported Amp routes
@@ -112,10 +112,8 @@ By default, this proxy handles Droid LLM calls locally through Copilot and forwa
 | `/api/provider/openai/{version}/{*path}` | Any | Amp OpenAI provider routes proxied through Copilot. |
 | `/api/provider/anthropic/{version}/messages` | POST | Native Claude models forwarded via Copilot `/v1/messages` (except lightweight user-initiated haiku which is rewritten to `gpt-5-mini`); other models converted through Copilot `/chat/completions`. |
 | `/api/provider/anthropic/{version}/messages/count_tokens` | POST | Native Claude models forwarded to Copilot `/v1/messages/count_tokens`; other models use local token estimation. |
-| `/api/provider/google/{version}/models/{model}:{action}` | POST | Gemini `generateContent`, `streamGenerateContent`, and `countTokens` translated through Copilot. |
 | `/api/llm/o/v1/{*path}` | Any | Droid OpenAI-like LLM routes handled locally through Copilot. `droid` currently uses `/api/llm/o/v1/responses` for GPT-family models. |
 | `/api/llm/a/v1/messages` and `/api/llm/a/v1/messages/count_tokens` | POST | Droid Anthropic-like LLM routes handled locally through Copilot. |
-| `/api/llm/g/v1/generate` | POST | Droid Gemini LLM route handled locally by translating Gemini-native requests through Copilot. |
 | `/api/cli/*`, `/api/organization/*`, `/api/sessions/*`, `/api/telemetry/*` | Varies | Droid control-plane routes proxied to `https://api.factory.ai` or `FACTORY_UPSTREAM_URL` by default. Under `--droid-local`, the supported local subset is served directly and unsupported routes return `501 Not Implemented`. |
 | `/api/threads/find`, `/api/threads/{id}.md`, `/api/internal`, `/api/telemetry`, `/api/durable-thread-workers/*`, `/api/users/*`, `/api/attachments` | Varies | Handled locally only when `--amp-local` is enabled. |
 | `/news.rss` | Any | Proxied to Amp upstream by default. Served as a small local RSS stub when `--amp-local` is enabled. |
@@ -163,17 +161,6 @@ curl -X POST http://localhost:9876/v1/messages/count_tokens \
   -d '{
     "model": "claude-sonnet-4-20250514",
     "messages": [{"role": "user", "content": "Hello"}]
-  }'
-```
-
-### Gemini Provider Route
-
-```bash
-curl -X POST \
-  "http://localhost:9876/api/provider/google/v1beta/models/gemini-2.5-pro:generateContent" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "contents": [{"role": "user", "parts": [{"text": "Hello"}]}]
   }'
 ```
 
@@ -309,7 +296,6 @@ In both modes, Droid LLM routes stay local:
 
 - `/api/llm/o/v1/*`
 - `/api/llm/a/v1/*`
-- `/api/llm/g/v1/generate`
 
 Under `--droid-local`, unsupported non-LLM Droid routes return `501 Not Implemented` instead of proxying upstream.
 
@@ -319,13 +305,13 @@ Under `--droid-local`, unsupported non-LLM Droid routes return `501 Not Implemen
 2. The server exchanges that GitHub token for a Copilot API token.
 3. `TokenManager` refreshes the Copilot token in the background before expiry.
 4. OpenAI-compatible `/v1/*` requests are forwarded to `api.individual.githubcopilot.com` with Copilot headers injected.
-5. Native Claude models on Anthropic routes are forwarded directly to Copilot's `/v1/messages` endpoint; non-Claude Anthropic models and Gemini compatibility routes translate request and response formats around the same Copilot upstream.
-6. Amp provider routes are handled locally when supported; Amp management routes are proxied to `ampcode.com` by default, while `--amp-local` serves the supported local subset, stubs `/news.rss`, and rejects other Amp fallbacks with `501 Not Implemented`.
-7. Droid LLM routes are always handled locally through Copilot-compatible adapters. Droid control-plane routes are proxied to Factory by default, while `--droid-local` serves the supported local subset and rejects unsupported upstream fallbacks with `501 Not Implemented`.
+5. Native Claude models on Anthropic routes are forwarded directly to Copilot's `/v1/messages` endpoint; non-Claude Anthropic models translate request and response formats around the same Copilot upstream.
+6. Amp provider routes are handled locally when supported; removed provider surfaces return `501 Not Implemented` instead of being proxied. Amp management routes are proxied to `ampcode.com` by default, while `--amp-local` serves the supported local subset, stubs `/news.rss`, and rejects other Amp fallbacks with `501 Not Implemented`.
+7. Supported Droid LLM routes are handled locally through Copilot-compatible adapters, while removed provider surfaces return `501 Not Implemented`. Droid control-plane routes are proxied to Factory by default, while `--droid-local` serves the supported local subset and rejects unsupported upstream fallbacks with `501 Not Implemented`.
 
 ### Sticky Inference
 
-For OpenAI chat/responses requests and converted Anthropic/Gemini requests, the proxy inspects message history:
+For OpenAI chat/responses requests and converted Anthropic requests, the proxy inspects message history:
 
 - Requests with only user turns are marked `X-Initiator: user`
 - Requests containing prior `assistant` or `tool` turns are marked `X-Initiator: agent`
