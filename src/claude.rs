@@ -17,10 +17,7 @@ pub struct ClaudeRequestMetadata {
     pub is_vision: bool,
 }
 
-pub fn analyze_claude_request(
-    body: &[u8],
-    headers: Option<&HeaderMap>,
-) -> Result<ClaudeRequestMetadata, Error> {
+pub fn analyze_claude_request(body: &[u8]) -> Result<ClaudeRequestMetadata, Error> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|e| Error::InvalidRequest(format!("Invalid JSON body: {e}")))?;
     let model = value
@@ -32,7 +29,7 @@ pub fn analyze_claude_request(
         .get("messages")
         .and_then(Value::as_array)
         .ok_or_else(|| Error::InvalidRequest("Missing required field: messages".to_string()))?;
-    let initiator = infer_initiator_claude(messages, headers);
+    let initiator = infer_initiator_claude(messages);
     let is_vision = messages.iter().any(|message| {
         message
             .get("content")
@@ -218,7 +215,7 @@ mod tests {
                 ]}
             ]
         });
-        let metadata = analyze_claude_request(body.to_string().as_bytes(), None).unwrap();
+        let metadata = analyze_claude_request(body.to_string().as_bytes()).unwrap();
         assert_eq!(metadata.model, "claude-sonnet-4.6");
         assert_eq!(metadata.initiator, "agent");
         assert!(metadata.is_vision);

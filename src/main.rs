@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use copilot_api_proxy::{auth, config, server, web_backend::SearchProvider};
+use copilot_api_proxy::{auth, config, server};
 use service_manager::{
     RestartPolicy, ServiceInstallCtx, ServiceLabel, ServiceLevel, ServiceManager,
     ServiceUninstallCtx,
@@ -30,24 +30,6 @@ enum Commands {
         port: u16,
         #[arg(long, default_value = "info")]
         log_level: String,
-        /// Handle Amp management APIs locally instead of proxying to ampcode.com.
-        /// Serves thread search, markdown export, telemetry, etc. from
-        /// local ~/.local/share/amp/threads/ data.
-        #[arg(long)]
-        amp_local: bool,
-        /// Handle Droid control-plane APIs locally instead of proxying to Factory.
-        /// LLM calls are still handled locally in both modes.
-        #[arg(long)]
-        droid_local: bool,
-        /// Search backend for web search and page extraction in --amp-local mode.
-        /// Requires --amp-local. Some backends need env vars for API keys.
-        #[arg(long, default_value = "jina", value_parser = clap::value_parser!(SearchProvider))]
-        search_provider: SearchProvider,
-        /// Model to use for --search-provider=model.
-        /// Must support the Responses API with web_search tool
-        /// (gpt-5-mini, gpt-5.1, gpt-5.2, gpt-5.4, gpt-5.4-mini).
-        #[arg(long, default_value = "gpt-5-mini")]
-        search_model: String,
     },
     /// Manage the system service
     Service {
@@ -82,22 +64,7 @@ async fn main() -> Result<()> {
             host,
             port,
             log_level,
-            amp_local,
-            droid_local,
-            search_provider,
-            search_model,
-        } => {
-            run_server(
-                &host,
-                port,
-                &log_level,
-                amp_local,
-                droid_local,
-                search_provider,
-                search_model,
-            )
-            .await
-        }
+        } => run_server(&host, port, &log_level).await,
         Commands::Service { action } => match action {
             ServiceAction::Install { host, port } => install_service(&host, port),
             ServiceAction::Uninstall => uninstall_service(),
@@ -121,32 +88,12 @@ async fn run_auth() -> Result<()> {
     Ok(())
 }
 
-async fn run_server(
-    host: &str,
-    port: u16,
-    log_level: &str,
-    amp_local: bool,
-    droid_local: bool,
-    search_provider: SearchProvider,
-    search_model: String,
-) -> Result<()> {
+async fn run_server(host: &str, port: u16, log_level: &str) -> Result<()> {
     let filter = format!("copilot_api_proxy={},tower_http={}", log_level, log_level);
     init_tracing(&filter);
 
-    let model_opt = if matches!(search_provider, SearchProvider::Model) {
-        Some(search_model)
-    } else {
-        None
-    };
-    let state = server::AppState::new(amp_local, droid_local, search_provider, model_opt).await?;
+    let state = server::AppState::new().await?;
     let app = server::create_router(state);
-
-    if amp_local {
-        tracing::info!("Amp local mode enabled — management APIs served from local thread data");
-    }
-    if droid_local {
-        tracing::info!("Droid local mode enabled — Factory control-plane APIs served locally");
-    }
 
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port)).await?;
     tracing::info!("Server listening on http://{}:{}", host, port);

@@ -1,4 +1,4 @@
-//! Shared OpenAI-compatible handlers reused by `/v1/*`, Amp, and Droid routes.
+//! OpenAI-compatible and native Claude handlers for `/v1/*` routes.
 
 use crate::claude::{
     analyze_claude_request, error_from_proxy, is_native_claude_model, merge_tool_result_blocks,
@@ -14,18 +14,13 @@ use axum::body::Bytes;
 use axum::http::{HeaderMap, Method};
 use axum::response::Response;
 
-fn analyze_openai_request(
-    path: &str,
-    method: &Method,
-    body: &[u8],
-    headers: &HeaderMap,
-) -> Option<RequestAnalysis> {
+fn analyze_openai_request(path: &str, method: &Method, body: &[u8]) -> Option<RequestAnalysis> {
     if *method != Method::POST {
         return None;
     }
     match path {
-        "chat/completions" => Some(analyze_openai_chat_completions(body, Some(headers))),
-        "responses" => Some(analyze_openai_responses(body, Some(headers))),
+        "chat/completions" => Some(analyze_openai_chat_completions(body)),
+        "responses" => Some(analyze_openai_responses(body)),
         _ => None,
     }
 }
@@ -40,7 +35,7 @@ pub async fn handle_openai_passthrough(
 ) -> Result<Response, Error> {
     let content_type = headers.get("content-type").and_then(|v| v.to_str().ok());
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
-    let analysis = analyze_openai_request(api_path, &method, &body, headers);
+    let analysis = analyze_openai_request(api_path, &method, &body);
 
     let resp = state
         .proxy
@@ -74,7 +69,7 @@ pub async fn handle_native_claude_passthrough(
         return Ok(response);
     }
 
-    let metadata = match analyze_claude_request(&body, Some(headers)) {
+    let metadata = match analyze_claude_request(&body) {
         Ok(metadata) => metadata,
         Err(error) => return Ok(error_from_proxy(error)),
     };
@@ -111,7 +106,7 @@ pub async fn handle_native_claude_passthrough(
 #[cfg(test)]
 mod tests {
     use super::analyze_openai_request;
-    use axum::http::{HeaderMap, Method};
+    use axum::http::Method;
 
     #[test]
     fn claude_model_uses_normal_openai_analysis() {
@@ -119,9 +114,7 @@ mod tests {
             "model": "claude-sonnet-4.6",
             "messages": [{"role": "user", "content": "Hello"}]
         }"#;
-        let analysis =
-            analyze_openai_request("chat/completions", &Method::POST, body, &HeaderMap::new())
-                .unwrap();
+        let analysis = analyze_openai_request("chat/completions", &Method::POST, body).unwrap();
 
         assert_eq!(analysis.initiator, "user");
         assert!(!analysis.is_vision);
