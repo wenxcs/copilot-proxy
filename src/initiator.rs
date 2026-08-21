@@ -19,25 +19,6 @@ pub struct RequestAnalysis {
     pub is_vision: bool,
 }
 
-/// Infer the initiator from Claude/Anthropic format message history.
-/// Returns "agent" if any assistant/tool messages exist, or if the message
-/// content indicates an automated task worker or Amp subagent.
-/// Returns "user" otherwise.
-pub fn infer_initiator_claude(messages: &[Value], headers: Option<&HeaderMap>) -> &'static str {
-    let initiator = infer_initiator_from_messages(messages, &["assistant", "tool"]);
-    if initiator == "user" {
-        if let Some(hdrs) = headers {
-            if is_factory_client(hdrs) && messages_contain_task_marker(messages) {
-                return "agent";
-            }
-            if is_amp_client(hdrs) && messages_contain_amp_subagent_marker(messages) {
-                return "agent";
-            }
-        }
-    }
-    initiator
-}
-
 /// Analyze OpenAI chat completions request for initiator and vision.
 pub fn analyze_openai_chat_completions(
     body: &[u8],
@@ -169,8 +150,7 @@ const AMP_SUBAGENT_PATTERNS: &[&str] = &[
 
 /// Check whether any message in the request carries content that identifies it
 /// as originating from an automated task/worker agent.  This covers both OpenAI
-/// (system/user/developer role strings or content arrays) and Anthropic (user
-/// role content blocks) message shapes.
+/// (system/user/developer role strings or content arrays) message shapes.
 fn messages_contain_task_marker(messages: &[Value]) -> bool {
     for msg in messages {
         // Check both string and array content shapes.
@@ -206,8 +186,7 @@ pub fn is_amp_client(headers: &HeaderMap) -> bool {
 
 /// Check whether any message in the request carries system prompt content that
 /// identifies it as originating from an Amp subagent (Oracle, Task, code
-/// search, etc.).  Checks both OpenAI (system/developer role) and Anthropic
-/// (user role content blocks) message shapes.
+/// search, etc.). Checks OpenAI string and content-array message shapes.
 fn messages_contain_amp_subagent_marker(messages: &[Value]) -> bool {
     for msg in messages {
         // Check both string and array content shapes.
@@ -233,46 +212,6 @@ fn messages_contain_amp_subagent_marker(messages: &[Value]) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn test_claude_user_only() {
-        let messages = vec![json!({"role": "user", "content": "Hello"})];
-        assert_eq!(infer_initiator_claude(&messages, None), "user");
-    }
-
-    #[test]
-    fn test_claude_with_assistant() {
-        let messages = vec![
-            json!({"role": "user", "content": "Hello"}),
-            json!({"role": "assistant", "content": "Hi there"}),
-        ];
-        assert_eq!(infer_initiator_claude(&messages, None), "agent");
-    }
-
-    #[test]
-    fn test_claude_with_tool() {
-        let messages = vec![
-            json!({"role": "user", "content": "Hello"}),
-            json!({"role": "tool", "content": "result"}),
-        ];
-        assert_eq!(infer_initiator_claude(&messages, None), "agent");
-    }
-
-    #[test]
-    fn test_claude_multi_turn() {
-        let messages = vec![
-            json!({"role": "user", "content": "Hello"}),
-            json!({"role": "assistant", "content": "Hi"}),
-            json!({"role": "user", "content": "How are you?"}),
-        ];
-        assert_eq!(infer_initiator_claude(&messages, None), "agent");
-    }
-
-    #[test]
-    fn test_claude_empty() {
-        let messages: Vec<Value> = vec![];
-        assert_eq!(infer_initiator_claude(&messages, None), "user");
-    }
 
     #[test]
     fn test_openai_user_only() {
@@ -423,30 +362,6 @@ mod tests {
     // --- Factory task worker detection tests ---
 
     #[test]
-    fn test_factory_task_worker_claude_string_content() {
-        // Worker marker in a plain string content block (Anthropic format)
-        let messages = vec![json!({
-            "role": "user",
-            "content": "You are a worker assigned to implement feature \"vector-impl\".\n## Worker Session"
-        })];
-        let headers = factory_headers();
-        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
-    }
-
-    #[test]
-    fn test_factory_task_worker_claude_array_content() {
-        // Worker marker in an Anthropic content-block array
-        let messages = vec![json!({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "<system-reminder>\nYou are a worker assigned to implement feature \"args-impl\".\n\n## Worker Session\n</system-reminder>"}
-            ]
-        })];
-        let headers = factory_headers();
-        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
-    }
-
-    #[test]
     fn test_factory_task_worker_openai_chat() {
         // Worker marker in an OpenAI chat completions request
         let body = json!({
@@ -475,27 +390,6 @@ mod tests {
     }
 
     #[test]
-    fn test_factory_orchestrator_stays_user() {
-        // Orchestrator session — no worker markers — should stay "user"
-        let messages = vec![json!({
-            "role": "user",
-            "content": "You are the orchestrator. Plan and implement this."
-        })];
-        let headers = factory_headers();
-        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "user");
-    }
-
-    #[test]
-    fn test_no_factory_header_ignores_markers() {
-        // Worker marker present but NO x-factory-client header — should stay "user"
-        let messages = vec![json!({
-            "role": "user",
-            "content": "You are a worker assigned to implement feature \"test\"."
-        })];
-        assert_eq!(infer_initiator_claude(&messages, None), "user");
-    }
-
-    #[test]
     fn test_task_marker_string_content() {
         let messages = vec![json!({
             "role": "user",
@@ -520,19 +414,6 @@ mod tests {
     fn test_no_task_marker() {
         let messages = vec![json!({"role": "user", "content": "Hello world"})];
         assert!(!messages_contain_task_marker(&messages));
-    }
-
-    #[test]
-    fn test_factory_subagent_claude() {
-        // Subagent marker in an Anthropic content-block array
-        let messages = vec![json!({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "# Task Tool Invocation\n\nSubagent type: worker\nTask description: Investigate codebase"}
-            ]
-        })];
-        let headers = factory_headers();
-        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
     }
 
     #[test]
@@ -564,91 +445,6 @@ mod tests {
         headers.insert("x-amp-thread-id", "T-019d90e9-test".parse().unwrap());
         headers.insert("x-amp-feature", "amp.chat".parse().unwrap());
         headers
-    }
-
-    #[test]
-    fn test_amp_oracle_claude() {
-        let messages = vec![json!({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "You are the Oracle - an expert AI advisor with advanced reasoning capabilities.\nYou are a subagent inside an AI coding system."}
-            ]
-        })];
-        let headers = amp_headers();
-        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
-    }
-
-    #[test]
-    fn test_amp_code_search_claude() {
-        let messages = vec![json!({
-            "role": "user",
-            "content": "You are a fast, parallel code search agent.\nSearch for usages of function foo."
-        })];
-        let headers = amp_headers();
-        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
-    }
-
-    #[test]
-    fn test_amp_diff_explainer_claude() {
-        let messages = vec![json!({
-            "role": "user",
-            "content": "You are a specialized subagent that explains diffs.\nExplain the following diff:"
-        })];
-        let headers = amp_headers();
-        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
-    }
-
-    #[test]
-    fn test_amp_librarian_claude() {
-        let messages = vec![json!({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "You are the Librarian, a specialized codebase understanding agent."}
-            ]
-        })];
-        let headers = amp_headers();
-        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
-    }
-
-    #[test]
-    fn test_amp_walkthrough_planner_claude() {
-        let messages = vec![json!({
-            "role": "user",
-            "content": "You are the Walkthrough Planner - an expert at exploring codebases."
-        })];
-        let headers = amp_headers();
-        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
-    }
-
-    #[test]
-    fn test_amp_repl_operator_claude() {
-        let messages = vec![json!({
-            "role": "user",
-            "content": "You are a REPL operator. Your text responses are sent DIRECTLY to a shell."
-        })];
-        let headers = amp_headers();
-        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
-    }
-
-    #[test]
-    fn test_amp_main_session_stays_user() {
-        // Main Amp session — no subagent markers — should stay "user"
-        let messages = vec![json!({
-            "role": "user",
-            "content": "You are a pragmatic, effective software engineer."
-        })];
-        let headers = amp_headers();
-        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "user");
-    }
-
-    #[test]
-    fn test_no_amp_header_ignores_markers() {
-        // Subagent marker present but NO x-amp-thread-id header — should stay "user"
-        let messages = vec![json!({
-            "role": "user",
-            "content": "You are the Oracle - an expert AI advisor."
-        })];
-        assert_eq!(infer_initiator_claude(&messages, None), "user");
     }
 
     #[test]

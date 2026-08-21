@@ -4,14 +4,12 @@
 //! 1. Provider API requests: `/api/provider/{provider}/v1/...` (inference)
 //! 2. Management requests: `/api/auth/*`, `/api/threads/*`, `/threads/*`, etc.
 //!
-//! Provider requests are handled locally through Copilot (OpenAI + Anthropic).
+//! Supported provider requests are handled locally through Copilot's
+//! OpenAI-compatible API.
 //! Unknown providers and management requests are proxied to ampcode.com.
 
 pub mod local;
 
-use crate::claude::{
-    analyze_claude_request, convert_claude_request, convert_openai_response, error_from_proxy,
-};
 use crate::error::Error;
 use crate::llm;
 use crate::proxy::forward_response;
@@ -376,7 +374,6 @@ async fn management_handler(
 #[derive(Debug, PartialEq, Eq)]
 enum ProviderRoute {
     OpenAi,
-    Anthropic,
     Removed,
     Upstream,
 }
@@ -384,8 +381,7 @@ enum ProviderRoute {
 fn classify_provider(provider: &str) -> ProviderRoute {
     match provider.to_ascii_lowercase().as_str() {
         "openai" => ProviderRoute::OpenAi,
-        "anthropic" => ProviderRoute::Anthropic,
-        "google" => ProviderRoute::Removed,
+        "anthropic" | "google" => ProviderRoute::Removed,
         _ => ProviderRoute::Upstream,
     }
 }
@@ -409,9 +405,6 @@ async fn handle_provider(
 
     match classify_provider(provider) {
         ProviderRoute::OpenAi => handle_openai(state, method, api_path, uri, headers, body).await,
-        ProviderRoute::Anthropic => {
-            handle_anthropic(state, method, api_path, uri, headers, body).await
-        }
         ProviderRoute::Removed => Ok(unsupported_provider_response(&method, uri, provider)),
         ProviderRoute::Upstream => {
             let pq = uri
@@ -473,72 +466,6 @@ async fn handle_openai(
     llm::handle_openai_passthrough(&state, method, api_path, uri.query(), &headers, body).await
 }
 
-/// Handle Anthropic/Claude provider requests: convert to OpenAI, forward via Copilot.
-async fn handle_anthropic(
-    state: AppState,
-    method: Method,
-    api_path: &str,
-    uri: &Uri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response, Error> {
-    if api_path == "messages" && method == Method::POST {
-        let metadata = match analyze_claude_request(&body, Some(&headers)) {
-            Ok(m) => m,
-            Err(e) => return Ok(error_from_proxy(e)),
-        };
-
-        let use_haiku_rewrite = !metadata.stream
-            && metadata.initiator == "user"
-            && metadata.model.to_lowercase().contains("haiku");
-        if use_haiku_rewrite {
-            let mut converted = match convert_claude_request(body, Some(&headers)) {
-                Ok(c) => c,
-                Err(e) => return Ok(error_from_proxy(e)),
-            };
-            converted.body = rewrite_model_in_body(&converted.body, "gpt-5-mini");
-            let query = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
-            let resp = match state
-                .proxy
-                .forward(
-                    &format!("/chat/completions{}", query),
-                    method,
-                    converted.body,
-                    Some("application/json"),
-                    Some(&converted.initiator),
-                    converted.is_vision,
-                )
-                .await
-            {
-                Ok(resp) => resp,
-                Err(err) => return Ok(error_from_proxy(err)),
-            };
-            return match convert_openai_response(resp, converted.model, converted.stream).await {
-                Ok(response) => Ok(response),
-                Err(err) => Ok(error_from_proxy(err)),
-            };
-        }
-    }
-
-    llm::handle_anthropic_compat(&state, method, api_path, uri.query(), &headers, body, false).await
-}
-
-/// Rewrite the "model" field in a JSON request body.
-fn rewrite_model_in_body(body: &Bytes, new_model: &str) -> Bytes {
-    if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body)
-        && let Some(obj) = value.as_object_mut()
-    {
-        obj.insert(
-            "model".to_string(),
-            serde_json::Value::String(new_model.to_string()),
-        );
-        if let Ok(bytes) = serde_json::to_vec(&value) {
-            return Bytes::from(bytes);
-        }
-    }
-    body.clone()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{ProviderRoute, classify_provider, unsupported_provider_response};
@@ -563,5 +490,18 @@ mod tests {
             value["error"]["path"],
             "/api/provider/google/v1beta/models/example:generateContent?alt=sse"
         );
+    }
+
+    #[tokio::test]
+    async fn anthropic_provider_is_rejected_locally() {
+        assert_eq!(classify_provider("anthropic"), ProviderRoute::Removed);
+        assert_eq!(classify_provider("AnThRoPiC"), ProviderRoute::Removed);
+
+        let uri: Uri = "/api/provider/anthropic/v1/messages".parse().unwrap();
+        let response = unsupported_provider_response(&Method::POST, &uri, "anthropic");
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["type"], "provider_not_supported");
     }
 }

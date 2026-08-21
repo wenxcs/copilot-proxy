@@ -2,17 +2,16 @@
 
 ## Project Overview
 
-**copilot-api-proxy** is a Rust reverse proxy around GitHub Copilot with four route families:
+**copilot-api-proxy** is a Rust reverse proxy around GitHub Copilot with three route families:
 
 1. OpenAI-compatible `/v1/*` routes that are forwarded nearly unchanged
-2. A compatibility layer for Anthropic Messages
-3. Amp provider and management routes for Amp CLI / IDE clients
-4. Droid LLM routes that are handled locally while Droid control-plane routes proxy to Factory by default
+2. Amp provider and management routes for Amp CLI / IDE clients
+3. Droid LLM routes that are handled locally while Droid control-plane routes proxy to Factory by default
 
 **Design Philosophy**
 
 - Keep OpenAI-compatible routes as raw-byte passthrough whenever possible.
-- Do protocol translation only on explicit compatibility surfaces for non-Claude models such as `/v1/messages`, `/v1/messages/count_tokens`, and Amp Anthropic provider routes. Native Claude models on Anthropic routes are forwarded directly.
+- Claude models remain supported as model IDs on Copilot's OpenAI-compatible routes. Anthropic-native protocol routes are rejected locally and never forwarded upstream.
 - Route ownership should stay explicit. `src/api.rs` owns the top-level `/api/*` split, while `src/amp/mod.rs` and `src/droid/mod.rs` own only their respective compatibility surfaces.
 - Proxy Amp management traffic to `ampcode.com` by default. In `--amp-local` mode, serve the supported local `/api/*` subset, stub `/news.rss`, and fail loudly for unsupported Amp fallbacks instead of proxying them upstream.
 - Handle supported Droid `/api/llm/*` inference routes locally through Copilot-compatible adapters in all modes, and reject removed provider surfaces locally instead of proxying them. Proxy non-LLM Droid control-plane traffic to Factory by default. In `--droid-local` mode, serve the supported local control-plane subset and fail loudly for unsupported Droid fallbacks instead of proxying them upstream.
@@ -86,15 +85,10 @@ curl -X POST http://localhost:9876/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini-2024-07-18","messages":[{"role":"user","content":"Hello"}]}'
 
-# Anthropic compatibility route
-curl -X POST http://localhost:9876/v1/messages \
+# Claude model through OpenAI chat completions
+curl -X POST http://localhost:9876/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"claude-sonnet-4-20250514","max_tokens":512,"messages":[{"role":"user","content":"Hello"}]}'
-
-# Anthropic token counting
-curl -X POST http://localhost:9876/v1/messages/count_tokens \
-  -H "Content-Type: application/json" \
-  -d '{"model":"claude-sonnet-4-20250514","messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"claude-sonnet-4.6","messages":[{"role":"user","content":"Hello"}]}'
 
 # List Copilot models via generic /v1 passthrough
 curl http://localhost:9876/v1/models
@@ -105,9 +99,6 @@ curl http://localhost:9876/v1/models
 ```bash
 # GitHub token (overrides file-based token)
 export GITHUB_TOKEN=your_github_token
-
-# Require an API key for the direct /v1/messages route
-export ANTHROPIC_API_KEY=your-secret-key
 
 # Override Amp management upstream
 export AMP_UPSTREAM_URL=https://ampcode.com
@@ -142,10 +133,8 @@ Axum Router
     |
     +-- /v1/{*path}
     |      |
-    |      +-- /v1/messages -> native Claude passthrough to Copilot /v1/messages
-    |      |                    or non-Claude conversion -> Copilot /chat/completions
-    |      +-- /v1/messages/count_tokens -> native Claude passthrough or local tiktoken estimator
-    |      '-- everything else -> generic Copilot passthrough
+    |      +-- /v1/messages* -> local 501 (removed protocol surface)
+    |      '-- everything else -> generic Copilot passthrough, including Claude model IDs
     |
     +-- /api/{*path}
     |      |
@@ -165,7 +154,7 @@ Axum Router
 
 1. **Generic OpenAI passthrough remains the default**. `/v1/{*path}` and Amp/Droid OpenAI-like routes forward raw bytes and avoid schema models where possible.
 2. **Top-level API routing is centralized**. `src/api.rs` owns `/api/{*path}` dispatch and delegates to Amp or Droid modules.
-3. **Compatibility logic is isolated**. Anthropic conversion lives in `src/claude.rs`; shared LLM route handlers live in `src/llm.rs`; token estimation lives in `src/token_counter.rs`.
+3. **Protocol removal is explicit**. Former Anthropic and Google provider namespaces return local `501 Not Implemented` responses rather than falling through to external upstreams.
 4. **Amp and Droid integrations are split cleanly**. `src/amp/mod.rs` owns Amp-specific provider and management behavior; `src/droid/mod.rs` owns Droid-specific behavior; local management subsets live in `src/amp/local.rs` and `src/droid/local.rs`.
 5. **Sticky inference is opt-in by route**. Only chat/responses-style requests are inspected for `X-Initiator` and vision headers.
 6. **Token refresh is background-managed**. `TokenManager` owns the Copilot token lifecycle and refreshes automatically.
@@ -186,16 +175,14 @@ src/
 ├── auth.rs          # GitHub device flow, token exchange, token manager
 ├── proxy.rs         # Copilot HTTP client and response forwarding
 ├── initiator.rs     # Sticky inference and vision detection
-├── server.rs        # Main router, /v1 handler, Anthropic direct route handling
-├── claude.rs        # Anthropic <-> OpenAI conversion, native Claude passthrough detection, and Anthropic-style errors
-├── llm.rs           # Shared local OpenAI/Anthropic route handlers
+├── server.rs        # Main router, /v1 handler, and removed-protocol blocking
+├── llm.rs           # Shared local OpenAI-compatible route handlers
 ├── amp/
 │   ├── mod.rs       # Amp provider routing and Amp-specific management proxy
 │   └── local.rs     # Local Amp API handlers (--amp-local mode)
 ├── droid/
 │   ├── mod.rs       # Droid LLM routing and Factory control-plane proxy
 │   └── local.rs     # Local Droid control-plane handlers (--droid-local mode)
-├── token_counter.rs # Local token estimation for Anthropic routes
 ├── error.rs         # Shared internal error enum with OpenAI-style responses
 └── web_backend/     # Amp web backend components for local mode
 ```
@@ -225,42 +212,20 @@ state
     .await?;
 ```
 
-Only two `/v1` paths are special-cased locally:
+Two removed protocol paths are special-cased locally and return `501 Not Implemented`:
 
 - `/v1/messages`
-- `/v1/messages/count_tokens`
+- `/v1/messages/*`
 
 Everything else remains generic passthrough.
 
-### 2. Anthropic Routes Use Native Passthrough For Claude Models
+### 2. Claude Models Use OpenAI-Compatible Routes
 
-**Files**: `src/server.rs`, `src/claude.rs`, `src/amp/mod.rs`
+**Files**: `src/server.rs`, `src/llm.rs`, `src/amp/mod.rs`, `src/droid/mod.rs`
 
-When the request model is a native Claude model (name contains `claude`, `sonnet`, `haiku`, or `opus`), both `/v1/messages` and `/v1/messages/count_tokens` forward the Anthropic request directly to Copilot's corresponding `/v1/messages` endpoint without any OpenAI conversion. Initiator and vision flags are still inferred from the Anthropic message history.
+Claude model IDs advertised by Copilot can be sent unchanged through `/v1/chat/completions`, `/v1/responses`, Amp's OpenAI provider routes, and Droid's OpenAI LLM routes. The proxy does not translate or remap Claude model names.
 
-Before forwarding, native Claude requests are normalized so a client can use the standard dated Anthropic public IDs (e.g. `claude-sonnet-4-20250514`, `claude-3-5-haiku-20241022`) even though Copilot upstream exposes dotted IDs like `claude-sonnet-5`. `remap_anthropic_model_for_copilot` (in `src/llm.rs`) fetches the upstream `/models` list (cached in `src/proxy.rs`) and, only when the requested model is confirmed absent, rewrites `model` to the configured fallback for its family:
-
-- `haiku` -> `SMALL_MODEL` (default `claude-haiku-4.5`)
-- `sonnet` (and bare `claude-*` names) -> `MIDDLE_MODEL` (default `claude-sonnet-5`)
-- `opus` -> `BIG_MODEL` (default `claude-opus-5`)
-
-Requests that already name a supported upstream model are left untouched, and if the model list cannot be fetched the request is forwarded unchanged. The small `ANTHROPIC_MODEL_ALIASES` table still applies afterward for explicit version bumps (e.g. `opus-4.6` -> `opus-4.7`).
-
-For non-Claude models, the full translation layer applies:
-
-1. Optionally checks `ANTHROPIC_API_KEY`
-2. Converts the Anthropic request into OpenAI chat/completions format
-3. Infers initiator and vision flags from Anthropic message history
-4. Sends the converted request to Copilot `/chat/completions`
-5. Converts the OpenAI response back into Anthropic format, including SSE streaming
-
-On the non-native conversion path, Anthropic model aliases are mapped by substring:
-
-- `haiku` -> `SMALL_MODEL`
-- `sonnet` -> `MIDDLE_MODEL`
-- `opus` -> `BIG_MODEL`
-
-`max_tokens` is clamped to `MIN_TOKENS_LIMIT..=MAX_TOKENS_LIMIT`.
+Anthropic-native `/v1/messages`, Amp `provider/anthropic/*`, and Droid `llm/a/*` routes return `501 Not Implemented`. This prevents removed protocol traffic from silently reaching Copilot, `ampcode.com`, or Factory.
 
 ### 3. `/api/*` Routing Is Centralized
 
@@ -321,20 +286,13 @@ Any other unsupported Amp fallback route returns `501 Not Implemented` with an `
 - `model` uses Copilot `/v1/responses` with the `web_search` tool; `--search-model` defaults to `gpt-5-mini`
 - `none` disables web search/page extraction
 
-### 5. Amp Anthropic Requests Have One Cost-Saving Rewrite
-
-**File**: `src/amp/mod.rs`
-
-For Amp Anthropic provider traffic, native Claude models are normally forwarded via Copilot `/v1/messages`. However, lightweight non-streaming user-initiated `haiku` requests are excluded from native passthrough and instead rewritten to `gpt-5-mini` through the OpenAI conversion path. This is intentionally limited to the Amp provider path and is not applied to the direct `/v1/messages` route.
-
-### 6. Droid Routing Uses Local LLM Adapters And Factory Control Plane
+### 5. Droid Routing Uses Local LLM Adapters And Factory Control Plane
 
 **Files**: `src/droid/mod.rs`, `src/droid/local.rs`, `src/llm.rs`
 
 In all modes, these Droid LLM routes are handled locally:
 
 - `/api/llm/o/v1/*`
-- `/api/llm/a/v1/*`
 
 `droid::matches_api_path` claims every top-level `/api/*` segment the Droid CLI is known to call (verified against the `droid` v0.109.1 binary):
 
@@ -373,7 +331,7 @@ When `--droid-local` is enabled, a strict local subset is served for:
 
 Unsupported non-LLM Droid routes return `501 Not Implemented` instead of proxying upstream under `--droid-local`.
 
-### 7. Copilot Headers Are Mandatory
+### 6. Copilot Headers Are Mandatory
 
 **File**: `src/proxy.rs`
 
@@ -391,13 +349,12 @@ The proxy also sets:
 - `X-Initiator: user|agent`
 - `Copilot-Vision-Request: true` for vision inputs
 
-### 8. Sticky Inference Is Minimal And Route-Aware
+### 7. Sticky Inference Is Minimal And Route-Aware
 
 **Files**: `src/initiator.rs`, `src/server.rs`, `src/amp/mod.rs`
 
 - OpenAI chat completions inspect `messages`
 - OpenAI responses inspect `input`
-- Anthropic requests infer from Anthropic message roles before conversion
 
 Rules:
 
@@ -421,7 +378,7 @@ overridden to `agent` even when no prior assistant messages exist:
   `"You are the Walkthrough Planner"`, `"You are a REPL operator"`).
   The main Amp session (no subagent markers) stays `"user"`.
 
-### 9. Token Lifecycle
+### 8. Token Lifecycle
 
 **Files**: `src/auth.rs`, `src/config.rs`
 
@@ -446,7 +403,7 @@ GET https://api.github.com/copilot_internal/v2/token
 Authorization: token {github_token}
 ```
 
-### 10. Response Forwarding Filters Hop-By-Hop Headers
+### 9. Response Forwarding Filters Hop-By-Hop Headers
 
 **File**: `src/proxy.rs`
 
@@ -463,12 +420,12 @@ Authorization: token {github_token}
 
 If the upstream response is SSE and lacks `cache-control`, the proxy adds `Cache-Control: no-cache`.
 
-### 11. Error Shaping Depends On The Surface
+### 10. Error Shaping Depends On The Surface
 
-**Files**: `src/error.rs`, `src/claude.rs`
+**Files**: `src/error.rs`, `src/server.rs`, `src/amp/mod.rs`, `src/droid/mod.rs`
 
 - Internal errors returned from generic handlers use an OpenAI-style `{ "error": ... }` envelope.
-- Anthropic compatibility routes reshape upstream and local errors into Anthropic-style error payloads.
+- Removed provider and protocol surfaces use local `501 Not Implemented` error payloads.
 
 ---
 
@@ -536,10 +493,6 @@ cargo run -- auth
 1. Remove `~/.local/share/copilot-api-proxy/github_token`
 2. Re-run `cargo run -- auth`
 
-### Anthropic `/v1/messages` returns unauthorized
-
-If `ANTHROPIC_API_KEY` is set, clients must send the same key via `x-api-key` or `Authorization: Bearer ...`.
-
 ### Amp management routes fail with upstream auth errors
 
 Set `AMP_API_KEY` or make sure `~/.local/share/amp/secrets.json` contains a valid Amp API key.
@@ -565,5 +518,5 @@ RUST_LOG=copilot_api_proxy=debug,tower_http=debug cargo run -- server
 ### Model-specific errors
 
 - `/v1/responses` depends on the selected upstream model supporting the Responses API
-- Anthropic compatibility routes use native Copilot `/v1/messages` for Claude models and Copilot chat completions for others
+- Claude models remain usable through Copilot's OpenAI-compatible routes when listed by `/v1/models`
 - Use `curl http://localhost:9876/v1/models | jq '.data[].id'` to inspect the upstream model list

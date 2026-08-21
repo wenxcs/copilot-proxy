@@ -45,9 +45,6 @@ futures = "0.3"
 # Gzip decompression (for Amp CLI compressed bodies)
 flate2 = "1"
 
-# Token counting
-tiktoken-rs = "0.9"
-
 # Service management
 service-manager = "0.10"
 
