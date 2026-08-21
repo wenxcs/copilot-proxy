@@ -3,6 +3,7 @@
 pub mod amp;
 pub mod api;
 pub mod auth;
+pub mod claude;
 pub mod config;
 pub mod droid;
 pub mod error;

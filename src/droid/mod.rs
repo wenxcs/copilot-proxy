@@ -98,7 +98,7 @@ impl DroidManagementProxy {
 ///     (`update-settings`, `update-title`, `message/create`, `droid-status`,
 ///     `archive`, `unarchive`, `privacy`, `git-ai/checkpoints`, `git-ai/notes`,
 ///     `git-ai/pull-requests`, `mission/metadata`, `pin`), `sessions/pinned`
-///   - `llm/o/v1/*`,
+///   - `llm/o/v1/*`, `llm/a/v1/messages`,
 ///     `llm/custom/usage`, `llm/failed-requests`
 ///   - `daemon/heartbeat`
 ///   - `hello`
@@ -201,6 +201,21 @@ async fn handle_llm_request(
         .await;
     }
 
+    if let Some(anthropic_path) = llm_path.strip_prefix("a/v1/")
+        && matches!(anthropic_path, "messages" | "messages/count_tokens")
+    {
+        return llm::handle_native_claude_passthrough(
+            &state,
+            method,
+            anthropic_path,
+            uri.query(),
+            &headers,
+            body,
+            false,
+        )
+        .await;
+    }
+
     if is_removed_llm_provider(llm_path) {
         let provider = llm_path.split('/').next().unwrap_or(llm_path);
         return Ok(unsupported_llm_provider_response(&method, pq, provider));
@@ -221,7 +236,7 @@ async fn handle_llm_request(
 }
 
 fn is_removed_llm_provider(path: &str) -> bool {
-    path.starts_with("a/") || path.starts_with("g/")
+    path.starts_with("g/")
 }
 
 fn unsupported_llm_provider_response(method: &Method, path: &str, provider: &str) -> Response {
@@ -350,7 +365,7 @@ mod tests {
     async fn google_llm_provider_is_rejected_locally() {
         assert!(is_removed_llm_provider("g/v1/generate"));
         assert!(!is_removed_llm_provider("o/v1/responses"));
-        assert!(is_removed_llm_provider("a/v1/messages"));
+        assert!(!is_removed_llm_provider("a/v1/messages"));
 
         let response =
             unsupported_llm_provider_response(&Method::POST, "/api/llm/g/v1/generate", "g");
@@ -360,18 +375,5 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["error"]["type"], "provider_not_supported");
         assert_eq!(value["error"]["path"], "/api/llm/g/v1/generate");
-    }
-
-    #[tokio::test]
-    async fn anthropic_llm_provider_is_rejected_locally() {
-        assert!(is_removed_llm_provider("a/v1/messages"));
-
-        let response =
-            unsupported_llm_provider_response(&Method::POST, "/api/llm/a/v1/messages", "a");
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["error"]["type"], "provider_not_supported");
-        assert_eq!(value["error"]["path"], "/api/llm/a/v1/messages");
     }
 }

@@ -4,8 +4,7 @@
 //! 1. Provider API requests: `/api/provider/{provider}/v1/...` (inference)
 //! 2. Management requests: `/api/auth/*`, `/api/threads/*`, `/threads/*`, etc.
 //!
-//! Supported provider requests are handled locally through Copilot's
-//! OpenAI-compatible API.
+//! Supported provider requests are handled locally through Copilot.
 //! Unknown providers and management requests are proxied to ampcode.com.
 
 pub mod local;
@@ -374,6 +373,7 @@ async fn management_handler(
 #[derive(Debug, PartialEq, Eq)]
 enum ProviderRoute {
     OpenAi,
+    Anthropic,
     Removed,
     Upstream,
 }
@@ -381,7 +381,8 @@ enum ProviderRoute {
 fn classify_provider(provider: &str) -> ProviderRoute {
     match provider.to_ascii_lowercase().as_str() {
         "openai" => ProviderRoute::OpenAi,
-        "anthropic" | "google" => ProviderRoute::Removed,
+        "anthropic" => ProviderRoute::Anthropic,
+        "google" => ProviderRoute::Removed,
         _ => ProviderRoute::Upstream,
     }
 }
@@ -405,6 +406,9 @@ async fn handle_provider(
 
     match classify_provider(provider) {
         ProviderRoute::OpenAi => handle_openai(state, method, api_path, uri, headers, body).await,
+        ProviderRoute::Anthropic => {
+            handle_anthropic(state, method, api_path, uri, headers, body).await
+        }
         ProviderRoute::Removed => Ok(unsupported_provider_response(&method, uri, provider)),
         ProviderRoute::Upstream => {
             let pq = uri
@@ -466,6 +470,29 @@ async fn handle_openai(
     llm::handle_openai_passthrough(&state, method, api_path, uri.query(), &headers, body).await
 }
 
+async fn handle_anthropic(
+    state: AppState,
+    method: Method,
+    api_path: &str,
+    uri: &Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, Error> {
+    if matches!(api_path, "messages" | "messages/count_tokens") {
+        return llm::handle_native_claude_passthrough(
+            &state,
+            method,
+            api_path,
+            uri.query(),
+            &headers,
+            body,
+            false,
+        )
+        .await;
+    }
+    Ok(unsupported_provider_response(&method, uri, "anthropic"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ProviderRoute, classify_provider, unsupported_provider_response};
@@ -492,16 +519,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn anthropic_provider_is_rejected_locally() {
-        assert_eq!(classify_provider("anthropic"), ProviderRoute::Removed);
-        assert_eq!(classify_provider("AnThRoPiC"), ProviderRoute::Removed);
-
-        let uri: Uri = "/api/provider/anthropic/v1/messages".parse().unwrap();
-        let response = unsupported_provider_response(&Method::POST, &uri, "anthropic");
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(value["error"]["type"], "provider_not_supported");
+    #[test]
+    fn anthropic_provider_routes_locally() {
+        assert_eq!(classify_provider("anthropic"), ProviderRoute::Anthropic);
+        assert_eq!(classify_provider("AnThRoPiC"), ProviderRoute::Anthropic);
     }
 }

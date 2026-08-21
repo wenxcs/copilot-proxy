@@ -11,7 +11,7 @@
 **Design Philosophy**
 
 - Keep OpenAI-compatible routes as raw-byte passthrough whenever possible.
-- Claude models remain supported as model IDs on Copilot's OpenAI-compatible routes. Anthropic-native protocol routes are rejected locally and never forwarded upstream.
+- Native Claude requests are forwarded directly to Copilot `/v1/messages`; Claude models also remain supported on Copilot's OpenAI-compatible routes. Non-Claude models are never converted on Anthropic routes.
 - Route ownership should stay explicit. `src/api.rs` owns the top-level `/api/*` split, while `src/amp/mod.rs` and `src/droid/mod.rs` own only their respective compatibility surfaces.
 - Proxy Amp management traffic to `ampcode.com` by default. In `--amp-local` mode, serve the supported local `/api/*` subset, stub `/news.rss`, and fail loudly for unsupported Amp fallbacks instead of proxying them upstream.
 - Handle supported Droid `/api/llm/*` inference routes locally through Copilot-compatible adapters in all modes, and reject removed provider surfaces locally instead of proxying them. Proxy non-LLM Droid control-plane traffic to Factory by default. In `--droid-local` mode, serve the supported local control-plane subset and fail loudly for unsupported Droid fallbacks instead of proxying them upstream.
@@ -133,7 +133,7 @@ Axum Router
     |
     +-- /v1/{*path}
     |      |
-    |      +-- /v1/messages* -> local 501 (removed protocol surface)
+    |      +-- /v1/messages* -> native Claude passthrough to Copilot
     |      '-- everything else -> generic Copilot passthrough, including Claude model IDs
     |
     +-- /api/{*path}
@@ -154,7 +154,7 @@ Axum Router
 
 1. **Generic OpenAI passthrough remains the default**. `/v1/{*path}` and Amp/Droid OpenAI-like routes forward raw bytes and avoid schema models where possible.
 2. **Top-level API routing is centralized**. `src/api.rs` owns `/api/{*path}` dispatch and delegates to Amp or Droid modules.
-3. **Protocol removal is explicit**. Former Anthropic and Google provider namespaces return local `501 Not Implemented` responses rather than falling through to external upstreams.
+3. **Compatibility scope is explicit**. Anthropic routes accept only native Claude models and forward them without conversion. Google provider namespaces remain removed and return local `501 Not Implemented` responses.
 4. **Amp and Droid integrations are split cleanly**. `src/amp/mod.rs` owns Amp-specific provider and management behavior; `src/droid/mod.rs` owns Droid-specific behavior; local management subsets live in `src/amp/local.rs` and `src/droid/local.rs`.
 5. **Sticky inference is opt-in by route**. Only chat/responses-style requests are inspected for `X-Initiator` and vision headers.
 6. **Token refresh is background-managed**. `TokenManager` owns the Copilot token lifecycle and refreshes automatically.
@@ -175,8 +175,9 @@ src/
 ├── auth.rs          # GitHub device flow, token exchange, token manager
 ├── proxy.rs         # Copilot HTTP client and response forwarding
 ├── initiator.rs     # Sticky inference and vision detection
-├── server.rs        # Main router, /v1 handler, and removed-protocol blocking
-├── llm.rs           # Shared local OpenAI-compatible route handlers
+├── server.rs        # Main router and /v1 handler
+├── claude.rs        # Native Claude request analysis and passthrough helpers
+├── llm.rs           # Shared OpenAI and native Claude route handlers
 ├── amp/
 │   ├── mod.rs       # Amp provider routing and Amp-specific management proxy
 │   └── local.rs     # Local Amp API handlers (--amp-local mode)
@@ -212,20 +213,20 @@ state
     .await?;
 ```
 
-Two removed protocol paths are special-cased locally and return `501 Not Implemented`:
+Two Claude paths are special-cased and forwarded directly to Copilot for native Claude models:
 
 - `/v1/messages`
 - `/v1/messages/*`
 
 Everything else remains generic passthrough.
 
-### 2. Claude Models Use OpenAI-Compatible Routes
+### 2. Claude Uses Native Passthrough And OpenAI-Compatible Routes
 
 **Files**: `src/server.rs`, `src/llm.rs`, `src/amp/mod.rs`, `src/droid/mod.rs`
 
-Claude model IDs advertised by Copilot can be sent unchanged through `/v1/chat/completions`, `/v1/responses`, Amp's OpenAI provider routes, and Droid's OpenAI LLM routes. The proxy does not translate or remap Claude model names.
+Claude model IDs advertised by Copilot can be sent unchanged through `/v1/messages`, `/v1/chat/completions`, Amp's Anthropic/OpenAI provider routes, and Droid's Anthropic/OpenAI LLM routes. Native Claude requests are analyzed only for initiator and vision headers, then forwarded without cross-protocol conversion.
 
-Anthropic-native `/v1/messages`, Amp `provider/anthropic/*`, and Droid `llm/a/*` routes return `501 Not Implemented`. This prevents removed protocol traffic from silently reaching Copilot, `ampcode.com`, or Factory.
+Non-Claude models on Anthropic routes return an Anthropic-style `400 Bad Request`; clients must use an OpenAI-compatible route for those models. Direct `/v1/messages*` can optionally require `ANTHROPIC_API_KEY`.
 
 ### 3. `/api/*` Routing Is Centralized
 
@@ -293,6 +294,8 @@ Any other unsupported Amp fallback route returns `501 Not Implemented` with an `
 In all modes, these Droid LLM routes are handled locally:
 
 - `/api/llm/o/v1/*`
+- `/api/llm/a/v1/messages`
+- `/api/llm/a/v1/messages/count_tokens`
 
 `droid::matches_api_path` claims every top-level `/api/*` segment the Droid CLI is known to call (verified against the `droid` v0.109.1 binary):
 
@@ -355,6 +358,7 @@ The proxy also sets:
 
 - OpenAI chat completions inspect `messages`
 - OpenAI responses inspect `input`
+- Native Claude requests inspect Anthropic `messages`
 
 Rules:
 
@@ -518,5 +522,5 @@ RUST_LOG=copilot_api_proxy=debug,tower_http=debug cargo run -- server
 ### Model-specific errors
 
 - `/v1/responses` depends on the selected upstream model supporting the Responses API
-- Claude models remain usable through Copilot's OpenAI-compatible routes when listed by `/v1/models`
+- Claude models remain usable through Copilot's native and OpenAI-compatible routes when listed by `/v1/models`
 - Use `curl http://localhost:9876/v1/models | jq '.data[].id'` to inspect the upstream model list

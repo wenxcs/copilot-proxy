@@ -49,13 +49,14 @@ impl LocalDroidState {
                 "provider_routing": {
                     "version": 1,
                     "defaults": {
+                        "anthropic": ["anthropic"],
                         "openai": ["openai"]
                     },
                     "models": {
-                        "claude-opus-4-6": ["openai"],
-                        "claude-opus-4-7": ["openai"],
-                        "claude-sonnet-4-6": ["openai"],
-                        "claude-haiku-4-5-20251001": ["openai"],
+                        "claude-opus-4-6": ["anthropic"],
+                        "claude-opus-4-7": ["anthropic"],
+                        "claude-sonnet-4-6": ["anthropic"],
+                        "claude-haiku-4-5-20251001": ["anthropic"],
                         "gpt-5.4": ["openai"],
                         "gpt-5.4-mini": ["openai"],
                         "gpt-5.3-codex": ["openai"],
@@ -727,7 +728,10 @@ mod tests {
         assert_eq!(feature_flags["flags"]["mission_ui_entrypoints"], true);
         let provider_routing = &feature_flags["configs"]["provider_routing"];
         assert!(provider_routing["defaults"].get("google").is_none());
-        assert!(provider_routing["defaults"].get("anthropic").is_none());
+        assert_eq!(
+            provider_routing["defaults"]["anthropic"],
+            serde_json::json!(["anthropic"])
+        );
         let advertised_models = provider_routing["models"].as_object().unwrap();
         assert!(
             !advertised_models
@@ -735,11 +739,9 @@ mod tests {
                 .any(|model| model.starts_with("gemini-"))
         );
         assert!(advertised_models.values().all(|providers| {
-            providers.as_array().is_some_and(|providers| {
-                providers
-                    .iter()
-                    .all(|provider| provider != "google" && provider != "anthropic")
-            })
+            providers
+                .as_array()
+                .is_some_and(|providers| providers.iter().all(|provider| provider != "google"))
         }));
         for model in [
             "claude-opus-4-6",
@@ -747,7 +749,7 @@ mod tests {
             "claude-sonnet-4-6",
             "claude-haiku-4-5-20251001",
         ] {
-            assert_eq!(advertised_models[model], serde_json::json!(["openai"]));
+            assert_eq!(advertised_models[model], serde_json::json!(["anthropic"]));
         }
         assert_eq!(
             local_json(Method::GET, "organization/agent-readiness-reports").await,

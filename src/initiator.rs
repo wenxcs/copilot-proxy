@@ -19,6 +19,19 @@ pub struct RequestAnalysis {
     pub is_vision: bool,
 }
 
+/// Infer initiator from native Anthropic message history.
+pub fn infer_initiator_claude(messages: &[Value], headers: Option<&HeaderMap>) -> &'static str {
+    let initiator = infer_initiator_from_messages(messages, &["assistant", "tool"]);
+    if initiator == "user"
+        && let Some(headers) = headers
+        && ((is_factory_client(headers) && messages_contain_task_marker(messages))
+            || (is_amp_client(headers) && messages_contain_amp_subagent_marker(messages)))
+    {
+        return "agent";
+    }
+    initiator
+}
+
 /// Analyze OpenAI chat completions request for initiator and vision.
 pub fn analyze_openai_chat_completions(
     body: &[u8],
@@ -212,6 +225,15 @@ fn messages_contain_amp_subagent_marker(messages: &[Value]) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_claude_initiator() {
+        let messages = vec![
+            json!({"role": "user", "content": "Hello"}),
+            json!({"role": "assistant", "content": "Hi"}),
+        ];
+        assert_eq!(infer_initiator_claude(&messages, None), "agent");
+    }
 
     #[test]
     fn test_openai_user_only() {

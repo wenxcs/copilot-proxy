@@ -12,8 +12,8 @@ use crate::web_backend::SearchProvider;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, Path, State};
-use axum::http::{HeaderMap, Method, Request, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::http::{HeaderMap, Method, Request};
+use axum::response::Response;
 use axum::routing::{any, get};
 use std::sync::Arc;
 use tower_http::trace::MakeSpan;
@@ -118,60 +118,18 @@ async fn proxy_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, Error> {
-    if is_removed_protocol_path(&path) {
-        return Ok(removed_protocol_response(&method, uri.path(), "anthropic"));
+    if matches!(path.as_str(), "messages" | "messages/count_tokens") {
+        return llm::handle_native_claude_passthrough(
+            &state,
+            method,
+            &path,
+            uri.query(),
+            &headers,
+            body,
+            true,
+        )
+        .await;
     }
 
     llm::handle_openai_passthrough(&state, method, &path, uri.query(), &headers, body).await
-}
-
-fn is_removed_protocol_path(path: &str) -> bool {
-    path == "messages" || path.starts_with("messages/")
-}
-
-fn removed_protocol_response(method: &Method, path: &str, protocol: &str) -> Response {
-    tracing::warn!(
-        target: "server",
-        method = %method,
-        path = %path,
-        protocol = %protocol,
-        "Protocol surface is not supported"
-    );
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        axum::Json(serde_json::json!({
-            "error": {
-                "message": format!("Protocol '{protocol}' is not supported"),
-                "type": "protocol_not_supported",
-                "path": path,
-                "method": method.as_str()
-            }
-        })),
-    )
-        .into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{is_removed_protocol_path, removed_protocol_response};
-    use axum::body::to_bytes;
-    use axum::http::{Method, StatusCode};
-
-    #[tokio::test]
-    async fn anthropic_protocol_is_rejected_locally() {
-        assert!(is_removed_protocol_path("messages"));
-        assert!(is_removed_protocol_path("messages/count_tokens"));
-        assert!(is_removed_protocol_path("messages/future_action"));
-        assert!(!is_removed_protocol_path("chat/completions"));
-        assert!(!is_removed_protocol_path("responses"));
-
-        for path in ["/v1/messages", "/v1/messages/count_tokens"] {
-            let response = removed_protocol_response(&Method::POST, path, "anthropic");
-            assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(value["error"]["type"], "protocol_not_supported");
-            assert_eq!(value["error"]["path"], path);
-        }
-    }
 }
