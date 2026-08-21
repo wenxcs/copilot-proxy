@@ -117,7 +117,7 @@ fn init_tracing(default_filter: &str) {
         .init();
 }
 
-const SERVICE_LABEL: &str = "me.messense.copilot-api-proxy";
+const SERVICE_LABEL: &str = "com.copilot-proxy";
 
 fn install_service(host: &str, port: u16) -> Result<()> {
     let label: ServiceLabel = SERVICE_LABEL.parse()?;
