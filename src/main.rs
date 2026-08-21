@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use copilot_api_proxy::{auth, config, server};
 use service_manager::{
-    RestartPolicy, ServiceInstallCtx, ServiceLabel, ServiceLevel, ServiceManager,
+    RestartPolicy, ServiceInstallCtx, ServiceLabel, ServiceLevel, ServiceManager, ServiceStartCtx,
     ServiceUninstallCtx,
 };
 use std::ffi::OsString;
@@ -146,18 +146,14 @@ fn install_service(host: &str, port: u16) -> Result<()> {
             delay_secs: Some(10),
         },
     })?;
+    manager.start(ServiceStartCtx {
+        label: label.clone(),
+    })?;
 
     println!("Service installed successfully as '{}'", SERVICE_LABEL);
     println!("The service will listen on http://{}:{}", host, port);
     println!("The service will start automatically on system boot.");
-    println!("\nTo start the service now, run:");
-    #[cfg(target_os = "macos")]
-    println!(
-        "  launchctl load ~/Library/LaunchAgents/{}.plist",
-        SERVICE_LABEL
-    );
-    #[cfg(target_os = "linux")]
-    println!("  systemctl --user start {}", SERVICE_LABEL);
+    println!("The service has been started.");
 
     Ok(())
 }
