@@ -2,7 +2,7 @@
 
 use crate::claude::{
     analyze_claude_request, error_from_proxy, is_native_claude_model, merge_tool_result_blocks,
-    validate_anthropic_headers,
+    normalize_native_claude_body, validate_anthropic_headers,
 };
 use crate::error::Error;
 use crate::initiator::{
@@ -85,6 +85,7 @@ pub async fn handle_native_claude_passthrough(
     }
 
     let body = merge_tool_result_blocks(&body).unwrap_or(body);
+    let body = normalize_native_claude_body(body);
     let content_type = headers
         .get("content-type")
         .and_then(|value| value.to_str().ok());

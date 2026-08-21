@@ -143,6 +143,20 @@ pub fn merge_tool_result_blocks(body: &[u8]) -> Option<Bytes> {
         .flatten()
 }
 
+/// Remove optional Claude Code hints that Copilot's native endpoint rejects.
+pub fn normalize_native_claude_body(body: Bytes) -> Bytes {
+    let Ok(mut value) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body;
+    };
+    if object.remove("context_management").is_none() {
+        return body;
+    }
+    serde_json::to_vec(&value).map(Bytes::from).unwrap_or(body)
+}
+
 fn extract_client_api_key(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers
         .get("x-api-key")
@@ -208,5 +222,16 @@ mod tests {
         assert_eq!(metadata.model, "claude-sonnet-4.6");
         assert_eq!(metadata.initiator, "agent");
         assert!(metadata.is_vision);
+    }
+
+    #[test]
+    fn strips_unsupported_context_management_hint() {
+        let body = Bytes::from_static(
+            br#"{"model":"claude-sonnet-4.6","context_management":{"edits":[]},"messages":[]}"#,
+        );
+        let normalized = normalize_native_claude_body(body);
+        let value: Value = serde_json::from_slice(&normalized).unwrap();
+        assert!(value.get("context_management").is_none());
+        assert_eq!(value["model"], "claude-sonnet-4.6");
     }
 }
