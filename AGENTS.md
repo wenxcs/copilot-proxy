@@ -60,9 +60,6 @@ curl http://localhost:9876/v1/usage
 # Overrides the stored GitHub token
 export GITHUB_TOKEN=your_github_token
 
-# Optional client-facing key for native Claude routes
-export ANTHROPIC_API_KEY=your_client_api_key
-
 # Overrides logging completely
 export RUST_LOG=copilot_api_proxy=debug,tower_http=debug
 ```
@@ -119,11 +116,10 @@ All other generic paths are forwarded without body parsing.
 
 `POST /v1/messages` and `POST /v1/messages/count_tokens` are handled as native Claude requests. The handler:
 
-1. Optionally validates the client key when `ANTHROPIC_API_KEY` is configured.
-2. Requires a Claude-family model name.
-3. Infers initiator and vision headers from `messages`.
-4. Normalizes unsupported request hints while preserving the Anthropic protocol.
-5. Forwards directly to Copilot's `/v1/messages*` endpoint.
+1. Requires a Claude-family model name.
+2. Infers initiator and vision headers from `messages`.
+3. Normalizes unsupported request hints while preserving the Anthropic protocol.
+4. Forwards directly to Copilot's `/v1/messages*` endpoint.
 
 Other methods return an Anthropic-shaped `400 Bad Request` response.
 

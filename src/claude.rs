@@ -3,7 +3,7 @@
 use crate::error::Error;
 use crate::initiator::infer_initiator_claude;
 use axum::body::Bytes;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Response;
 use serde_json::Value;
 
@@ -54,23 +54,6 @@ pub fn is_native_claude_model(model: &str) -> bool {
         || model.contains("sonnet")
         || model.contains("haiku")
         || model.contains("opus")
-}
-
-pub fn validate_anthropic_headers(headers: &HeaderMap) -> Option<Response> {
-    let expected = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())?;
-
-    if extract_client_api_key(headers).as_deref() == Some(expected.as_str()) {
-        return None;
-    }
-
-    Some(error_response(
-        StatusCode::UNAUTHORIZED,
-        "authentication_error",
-        "Invalid API key. Please provide a valid Anthropic API key.",
-    ))
 }
 
 pub fn error_from_proxy(error: Error) -> Response {
@@ -152,30 +135,6 @@ pub fn normalize_native_claude_body(body: Bytes) -> Bytes {
         return body;
     }
     serde_json::to_vec(&value).map(Bytes::from).unwrap_or(body)
-}
-
-fn extract_client_api_key(headers: &HeaderMap) -> Option<String> {
-    if let Some(value) = headers
-        .get("x-api-key")
-        .and_then(|value| value.to_str().ok())
-    {
-        let value = value.trim();
-        if !value.is_empty() {
-            return Some(value.to_string());
-        }
-    }
-    headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .and_then(|value| {
-            value
-                .strip_prefix("Bearer ")
-                .or_else(|| value.strip_prefix("bearer "))
-        })
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
 }
 
 fn error_response(status: StatusCode, error_type: &str, message: &str) -> Response {

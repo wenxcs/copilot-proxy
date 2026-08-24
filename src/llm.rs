@@ -2,7 +2,7 @@
 
 use crate::claude::{
     analyze_claude_request, error_from_proxy, is_native_claude_model, merge_tool_result_blocks,
-    normalize_native_claude_body, validate_anthropic_headers,
+    normalize_native_claude_body,
 };
 use crate::error::Error;
 use crate::initiator::{
@@ -58,17 +58,12 @@ pub async fn handle_native_claude_passthrough(
     query: Option<&str>,
     headers: &HeaderMap,
     body: Bytes,
-    validate_client_api_key: bool,
 ) -> Result<Response, Error> {
     if method != Method::POST {
         return Ok(error_from_proxy(Error::InvalidRequest(format!(
             "Only POST is supported for {api_path}"
         ))));
     }
-    if validate_client_api_key && let Some(response) = validate_anthropic_headers(headers) {
-        return Ok(response);
-    }
-
     let metadata = match analyze_claude_request(&body) {
         Ok(metadata) => metadata,
         Err(error) => return Ok(error_from_proxy(error)),

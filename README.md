@@ -22,9 +22,9 @@ A Rust reverse proxy that exposes GitHub Copilot through OpenAI-compatible `/v1/
 ## Requirements
 
 - A GitHub account with an active Copilot subscription
-- A Rust toolchain when building from source
+- Docker with Docker Compose, or a Rust toolchain when building from source
 
-## Installation
+## Build from Source
 
 ```bash
 cargo build --release
@@ -32,7 +32,7 @@ cargo build --release
 
 The binary is written to `target/release/copilot-api-proxy`.
 
-## Quick Start
+## Local Binary Quick Start
 
 Authenticate once:
 
@@ -56,6 +56,51 @@ copilot-api-proxy server --log-level debug
 ```
 
 Use `http://localhost:9876/v1` as the base URL for an OpenAI-compatible client. Native Claude clients can use `http://localhost:9876` so their requests reach `/v1/messages`.
+
+## Docker Compose
+
+Docker Compose builds the release binary in a multi-stage image, so Rust is not required on the host.
+
+Build the image, then run the GitHub device flow inside a one-off container:
+
+```bash
+docker compose build
+docker compose run --rm copilot-proxy auth
+```
+
+Open the GitHub URL printed by the second command, enter the displayed code, and leave the command running until it reports `Authentication successful`.
+
+Start the proxy and verify that it can reach Copilot:
+
+```bash
+docker compose up -d
+curl --fail --show-error http://127.0.0.1:9876/v1/models
+```
+
+The server listens on `0.0.0.0:9876` inside the container. Compose maps it to `127.0.0.1:9876` on the host by default. To use a different host port, set `COPILOT_PROXY_PORT` when starting the service:
+
+```bash
+export COPILOT_PROXY_PORT=8080
+docker compose up -d
+```
+
+The `copilot-home` named volume stores the GitHub token and generated device identity. They survive container replacement and `docker compose down`. Running `docker compose down --volumes` deletes that data and requires authentication again.
+
+If you authenticate again while the server is already running, restart it so it loads the new token:
+
+```bash
+docker compose run --rm copilot-proxy auth
+docker compose restart copilot-proxy
+```
+
+View logs or stop the service with:
+
+```bash
+docker compose logs -f copilot-proxy
+docker compose down
+```
+
+`RUST_LOG` is passed into the container when it is set in the shell. Compose intentionally uses the persisted device-flow token instead of forwarding the host's `GITHUB_TOKEN`. The host binding can be changed with `COPILOT_PROXY_BIND`, but exposing the proxy beyond loopback should be done only on a trusted network because proxy routes do not require a client API key.
 
 ## API Surface
 
@@ -124,7 +169,6 @@ curl http://localhost:9876/v1/models
 | Variable | Description | Default |
 |---|---|---|
 | `GITHUB_TOKEN` | Overrides the stored GitHub token. | Token file |
-| `ANTHROPIC_API_KEY` | Optional client-facing key required on native `/v1/messages*` routes. | Unset |
 | `RUST_LOG` | Overrides the logging filter. | Unset |
 
 Token loading order:

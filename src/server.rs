@@ -84,7 +84,6 @@ async fn proxy_handler(
             uri.query(),
             &headers,
             body,
-            true,
         )
         .await;
     }
