@@ -1,0 +1,19 @@
+services:
+  copilot-proxy:
+    image: copilot-api-proxy:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["server", "--host", "0.0.0.0", "--port", "9876"]
+    ports:
+      - "${COPILOT_PROXY_BIND:-127.0.0.1}:${COPILOT_PROXY_PORT:-9876}:9876"
+    environment:
+      - RUST_LOG
+    volumes:
+      - copilot-home:/home/copilot
+    init: true
+    restart: unless-stopped
+    stop_signal: SIGINT
+
+volumes:
+  copilot-home:
