@@ -34,7 +34,7 @@ pub(crate) async fn authenticate(
     next.run(request).await
 }
 
-fn is_authorized(headers: &HeaderMap, api_key: &str) -> bool {
+pub(crate) fn is_authorized(headers: &HeaderMap, api_key: &str) -> bool {
     let mut credentials = headers.get_all(header::AUTHORIZATION).iter();
     let Some(value) = credentials.next() else {
         return false;

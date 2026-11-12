@@ -60,10 +60,21 @@ pub fn error_from_proxy(error: Error) -> Response {
     let (status, error_type) = match &error {
         Error::Auth(_) => (StatusCode::UNAUTHORIZED, "authentication_error"),
         Error::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request_error"),
-        Error::Upstream(_) => (StatusCode::BAD_GATEWAY, "api_error"),
+        Error::ModelDenied(_) => (StatusCode::FORBIDDEN, "permission_error"),
+        Error::ModelBusy(_) | Error::LimitExceeded { .. } => {
+            (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error")
+        }
+        Error::Upstream(_) | Error::UsageUnavailable => (StatusCode::BAD_GATEWAY, "api_error"),
         Error::Config(_) | Error::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "api_error"),
     };
-    error_response(status, error_type, &error.to_string())
+    let mut response = error_response(status, error_type, &error.to_string());
+    if let Some(retry_after) = error.retry_after() {
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            retry_after.to_string().parse().expect("valid seconds"),
+        );
+    }
+    response
 }
 
 pub fn merge_tool_result_blocks(body: &[u8]) -> Option<Bytes> {

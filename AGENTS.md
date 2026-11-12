@@ -9,7 +9,7 @@
 - Keep generic `/v1/*` requests as raw-byte passthrough whenever possible.
 - Forward native Claude requests directly to Copilot without converting protocols.
 - Accept only native Claude model families on Anthropic routes. Other models must use an OpenAI-compatible route.
-- Inspect only chat-completion, Responses, and native Claude request bodies for sticky initiator and vision headers.
+- Inspect only chat-completion, Responses, and native Claude request bodies for sticky initiator and vision headers. Configured model policies may additionally inspect top-level model identifiers in generic JSON requests.
 - Keep authentication, token refresh, and response forwarding independent from request schemas.
 
 ## Common Commands
@@ -63,6 +63,15 @@ export GITHUB_TOKEN=your_github_token
 # Requires Authorization: Bearer <key> on API routes (optional)
 export COPILOT_PROXY_API_KEY=your-secret-key
 
+# Optional ordered model access rules and fixed-window token allowances
+export COPILOT_PROXY_MODEL_RULES='-all,+gpt-6-astra,5h:gpt-6-astra:1024,7d:gpt-6-astra:1024'
+
+# Enables the separate admin limits interface
+export COPILOT_PROXY_SUPER_PASSWORD=your-admin-secret
+
+# Optional absolute path for persistent counters
+export COPILOT_PROXY_LIMIT_STATE_PATH=/path/to/model_usage.json
+
 # Overrides logging completely
 export RUST_LOG=copilot_api_proxy=debug,tower_http=debug
 ```
@@ -77,6 +86,9 @@ Axum router
     |
     +-- GET /v1/usage
     |      '-- fetch Copilot usage with the GitHub token
+    |
+    +-- /v1/admin/limits*
+    |      '-- inspect/reset local token limits using the super password
     |
     '-- /v1/{*path}
            |
@@ -95,6 +107,10 @@ src/
 ├── auth.rs       # GitHub device flow and Copilot token manager
 ├── client_auth.rs # Optional incoming bearer-token authentication
 ├── config.rs     # Token and VS Code identity storage
+├── policy_config.rs # Environment and private-file model policy configuration
+├── model_policy.rs # Model access rules and persistent fixed-window accounting
+├── usage.rs      # JSON and incremental SSE token usage observation
+├── metered_response.rs # Token accounting and errors before terminal SSE events
 ├── server.rs     # Axum state, router, and /v1 dispatch
 ├── llm.rs        # OpenAI and native Claude route handlers
 ├── claude.rs     # Native Claude validation and normalization
@@ -107,20 +123,32 @@ src/
 
 ### Client Authentication
 
-An optional `COPILOT_PROXY_API_KEY` requires `Authorization: Bearer <key>` on every matched `/v1/*` route, including usage and native Claude routes. `server --api-key`, `server --api-key-file`, and `service install --api-key` override the environment. The two server key flags conflict. Explicit key files must exist; only trailing CR/LF characters are stripped. Keys must be nonempty and contain only ASCII letters, digits, or `-._~+/=`; invalid configured keys are rejected, and an unset key preserves unauthenticated access. Invalid or missing client credentials return `401` JSON with `WWW-Authenticate: Bearer` before handlers inspect request bodies. Non-API paths retain normal `404` responses.
+An optional `COPILOT_PROXY_API_KEY` requires `Authorization: Bearer <key>` on proxy API routes, including usage and native Claude routes. Admin limit routes use a separate super password. `server --api-key`, `server --api-key-file`, and `service install --api-key` override the environment. The two server key flags conflict. Explicit key files must exist; only trailing CR/LF characters are stripped. Keys must be nonempty and contain only ASCII letters, digits, or `-._~+/=`; invalid configured keys are rejected, and an unset key preserves unauthenticated access. Invalid or missing client credentials return `401` JSON with `WWW-Authenticate: Bearer` before handlers inspect request bodies. Non-API paths retain normal `404` responses.
 
 The proxy API key is separate from GitHub OAuth and is never forwarded upstream. Service installation saves it in `~/.local/share/copilot-api-proxy/proxy_api_key` with mode `0600`, passes only its path in service arguments, and restarts an existing active service so changes take effect. Token files are created privately and existing permissions are restricted before writing secrets. Compose forwards the environment variable from the shell or `.env`.
+
+### Model Access and Token Limits
+
+`COPILOT_PROXY_MODEL_RULES` accepts comma/whitespace-separated `-all`, `+all`, `+model`, `-model`, `5h:model:tokens`, and `7d:model:tokens`. Access rules apply in order; `+all`/`-all` clear individual overrides. Quotas do not implicitly allow a denied model. Invalid rules fail startup; unset rules preserve unrestricted model access.
+
+Quotas count combined upstream input/output usage in fixed per-model windows anchored to first metered use, with independent 18,000-second and 604,800-second periods. Counters survive restart in a private `model_usage.json` beside the GitHub token; `COPILOT_PROXY_LIMIT_STATE_PATH` overrides this with an absolute path. Model denial returns `403`, exhausted allowance returns `429` with retry timing, and concurrent requests for the same limited model return `429`. Actual usage can exceed the remaining allowance within one response; missing usage or interrupted metered responses exhaust remaining allowances to prevent bypass.
+
+Metered chat streams request `stream_options.include_usage=true`. Native count-token routes check access without charging usage. Limited background Responses requests are rejected. Post-header streaming failures use SSE error events before protocol terminal events rather than changing the HTTP status. The ledger uses a process-lifetime file lock and atomic private-file writes; invalid state fails startup.
+
+`GET /v1/admin/limits` and `POST /v1/admin/limits/reset` require `Authorization: Bearer <COPILOT_PROXY_SUPER_PASSWORD>` independently of normal client authentication. The endpoints return `404` when the super password is unset. Empty/non-printable/whitespace passwords fail startup without logging the secret. Reset clears counters and invalidates accounting from existing requests while preserving rules/caps. Reset timestamps are Unix seconds.
+
+`server --model-policy-file PATH` reads complete JSON policy configuration instead of policy environment variables. Service installation stores configured rules, state path, and the super password in private `model_policy_config.json` and passes only its path. Compose forwards all three policy variables.
 
 ### Generic `/v1/*` Passthrough
 
 `src/server.rs` captures `/v1/{*path}`. `src/llm.rs` strips the leading `/v1`, preserves the query string and raw body, and forwards the request to the API base returned by Copilot's token exchange.
 
-Only these OpenAI-compatible paths are inspected:
+Only these OpenAI-compatible paths receive initiator and vision analysis:
 
 - `POST /v1/chat/completions`: inspect `messages`
 - `POST /v1/responses`: inspect `input`
 
-All other generic paths are forwarded without body parsing.
+Without model policies, all other generic paths are forwarded without body parsing. Configured policies also inspect top-level model identifiers on JSON POST/PUT/PATCH requests. Opaque bodies on other paths retain raw-byte passthrough. Only limited chat streams rewrite their JSON body to request usage metadata.
 
 ### Native Claude Routes
 

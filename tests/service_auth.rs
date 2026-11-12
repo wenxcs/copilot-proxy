@@ -51,6 +51,11 @@ esac
             .join("home/.local/share/copilot-api-proxy/proxy_api_key")
     }
 
+    fn policy_path(&self) -> PathBuf {
+        self.root
+            .join("home/.local/share/copilot-api-proxy/model_policy_config.json")
+    }
+
     fn unit(&self) -> String {
         fs::read_to_string(
             self.root
@@ -183,5 +188,130 @@ fn missing_or_empty_key_file_fails_server_startup() {
         assert!(stderr.to_lowercase().contains("api key"), "{stderr}");
         assert!(!stderr.contains("Token not found"), "{stderr}");
     }
+    assert!(sandbox.commands().is_empty());
+}
+
+#[test]
+fn service_captures_policy_and_admin_secret_only_in_private_configuration() {
+    let sandbox = Sandbox::new();
+    let rules = "-all,+gpt-6-astra,5h:gpt-6-astra:1024,7d:gpt-6-astra:2048";
+    let password = "admin!$%\"secret\\value";
+    let state_path = sandbox.root.join("private-state/usage.json");
+    let output = sandbox
+        .command()
+        .args(["service", "install"])
+        .env("COPILOT_PROXY_MODEL_RULES", rules)
+        .env("COPILOT_PROXY_SUPER_PASSWORD", password)
+        .env("COPILOT_PROXY_LIMIT_STATE_PATH", &state_path)
+        .output()
+        .unwrap();
+    assert_success(&output);
+
+    let policy_path = sandbox.policy_path();
+    let stored: serde_json::Value =
+        serde_json::from_slice(&fs::read(&policy_path).unwrap()).unwrap();
+    assert_eq!(stored["rules"], rules);
+    assert_eq!(stored["super_password"], password);
+    assert_eq!(stored["state_path"], state_path.to_str().unwrap());
+    assert_eq!(
+        fs::metadata(&policy_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(policy_path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let unit = sandbox.unit();
+    assert!(unit.contains("--model-policy-file"));
+    assert!(unit.contains(policy_path.to_str().unwrap()));
+    for text in [
+        unit,
+        sandbox.commands(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ] {
+        assert!(!text.contains(password));
+        assert!(!text.contains(rules));
+    }
+}
+
+#[test]
+fn invalid_policy_settings_fail_before_stopping_or_installing_a_service() {
+    for (name, value) in [
+        ("COPILOT_PROXY_MODEL_RULES", "5h:gpt-6-astra:-1"),
+        ("COPILOT_PROXY_MODEL_RULES", "8h:gpt-6-astra:1024"),
+        ("COPILOT_PROXY_MODEL_RULES", "gpt-6-astra"),
+        ("COPILOT_PROXY_SUPER_PASSWORD", ""),
+        ("COPILOT_PROXY_SUPER_PASSWORD", "secret with space"),
+        ("COPILOT_PROXY_SUPER_PASSWORD", "秘密"),
+        ("COPILOT_PROXY_LIMIT_STATE_PATH", "relative.json"),
+    ] {
+        let sandbox = Sandbox::new();
+        let output = sandbox
+            .command()
+            .args(["service", "install"])
+            .env(name, value)
+            .env("SERVICE_TEST_STATUS", "0")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{name}");
+        assert!(sandbox.commands().is_empty(), "{name}");
+        assert!(!sandbox.policy_path().exists());
+        if name == "COPILOT_PROXY_SUPER_PASSWORD" && !value.is_empty() {
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(value));
+        }
+    }
+}
+
+#[test]
+fn missing_or_invalid_policy_file_fails_before_github_authentication() {
+    let sandbox = Sandbox::new();
+    let file = sandbox.root.join("policy.json");
+    for contents in [
+        None,
+        Some("{"),
+        Some(r#"{"super_password":""}"#),
+        Some(r#"{"rules":"5h:gpt-6-astra:nope"}"#),
+        Some(r#"{"unknown_field":"secret-value"}"#),
+    ] {
+        if let Some(contents) = contents {
+            fs::write(&file, contents).unwrap();
+        }
+        let output = sandbox
+            .command()
+            .args(["server", "--model-policy-file"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Configuration error"), "{stderr}");
+        assert!(!stderr.contains("Token not found"), "{stderr}");
+        assert!(!stderr.contains("secret-value"));
+    }
+    assert!(sandbox.commands().is_empty());
+}
+
+#[test]
+fn explicit_policy_file_overrides_invalid_environment_without_using_network() {
+    let sandbox = Sandbox::new();
+    let file = sandbox.root.join("policy.json");
+    fs::write(&file, "{}").unwrap();
+    let output = sandbox
+        .command()
+        .args(["server", "--model-policy-file"])
+        .arg(&file)
+        .env("COPILOT_PROXY_MODEL_RULES", "invalid-rule")
+        .env("COPILOT_PROXY_SUPER_PASSWORD", "")
+        .env("COPILOT_PROXY_LIMIT_STATE_PATH", "relative.json")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    // Cleared environment and the isolated empty home ensure GitHub setup stops locally.
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Token not found"));
     assert!(sandbox.commands().is_empty());
 }

@@ -17,6 +17,8 @@ A Rust reverse proxy that exposes GitHub Copilot through OpenAI-compatible `/v1/
 - Sticky `X-Initiator` inference for multi-turn requests
 - GitHub OAuth device-flow authentication
 - Optional OpenAI-style bearer-token authentication for clients
+- Model allow/deny rules and persistent per-model token limits
+- Password-protected limit inspection and reset endpoints
 - Background Copilot token refresh
 - User-level service installation
 
@@ -76,7 +78,52 @@ curl http://localhost:9876/v1/models \
   -H "Authorization: Bearer $COPILOT_PROXY_API_KEY"
 ```
 
-Authentication covers every matched `/v1/*` route, including usage and native Claude endpoints. Native Claude clients must also send `Authorization: Bearer <key>`. Missing or invalid credentials return `401` with a JSON error and `WWW-Authenticate: Bearer`. The proxy API key is separate from the GitHub OAuth token and is never forwarded to Copilot.
+Client authentication covers proxy API routes, including usage and native Claude endpoints. Native Claude clients must also send `Authorization: Bearer <key>`. Missing or invalid credentials return `401` with a JSON error and `WWW-Authenticate: Bearer`. Admin limit endpoints use the separate super password described below. Neither client keys nor the super password are forwarded to Copilot.
+
+## Model Access and Token Limits
+
+Configure rules and an optional admin super password before starting the server:
+
+```bash
+export COPILOT_PROXY_MODEL_RULES='-all,+gpt-6-astra,5h:gpt-6-astra:1024,7d:gpt-6-astra:1024'
+export COPILOT_PROXY_SUPER_PASSWORD='your-admin-secret'
+copilot-api-proxy server
+```
+
+Rules accept comma or whitespace separators:
+
+| Rule | Effect |
+|---|---|
+| `-all` | Disallow every model and clear individual allow/deny overrides. |
+| `+all` | Allow every model and clear individual allow/deny overrides. |
+| `+gpt-6-astra` | Allow this exact model ID. |
+| `-gpt-6-astra` | Disallow this exact model ID. |
+| `5h:gpt-6-astra:1024` | Set a 1,024-token allowance for each 5-hour window. |
+| `7d:gpt-6-astra:1024` | Set a 1,024-token allowance for each 7-day window. |
+
+Access rules apply in order, so the last applicable rule wins. Setting a token limit does not allow an otherwise disallowed model. Without rules, all models remain allowed and no local token limits apply. Invalid rules prevent startup.
+
+Limits count combined input and output tokens reported by upstream, including cached input tokens. Each model has independent fixed windows anchored to its first metered request: 5 hours is 18,000 seconds and 7 days is 604,800 seconds. Requests within a window do not extend it. Both configured allowances must remain available. Denied models return `403`; exhausted limits return `429` with a JSON error and retry timing. A limited model accepts one request at a time; overlapping requests return `429` and can be retried after the current request completes.
+
+Policies check model identifiers on JSON requests, including chat completions, Responses, and native Claude. Native token-count requests check model access without consuming the allowance. Limited chat streams automatically request upstream usage metadata. Background Responses requests are rejected for limited models because their final usage cannot be verified in the initial response. If a limit error is discovered after streaming headers were sent, the HTTP status remains `200` and an SSE `error` event appears before the terminal event.
+
+Actual usage is known after upstream processes a request, so one response can exceed the remaining allowance. If a successful response has no usable usage data, or its stream is interrupted, the remaining allowance is exhausted to prevent uncounted requests. Usage counters persist across restarts in `~/.local/share/copilot-api-proxy/model_usage.json` with private file permissions. Set `COPILOT_PROXY_LIMIT_STATE_PATH` to an absolute file path to use another location; for Docker, this must be a container path on persistent storage.
+
+Only one proxy process can use a counter file at a time. Corrupt state prevents startup instead of silently clearing allowances.
+
+Inspect or reset all model counters with the super password:
+
+```bash
+curl http://localhost:9876/v1/admin/limits \
+  -H "Authorization: Bearer $COPILOT_PROXY_SUPER_PASSWORD"
+
+curl -X POST http://localhost:9876/v1/admin/limits/reset \
+  -H "Authorization: Bearer $COPILOT_PROXY_SUPER_PASSWORD"
+```
+
+These admin endpoints require the super password independently of the client API key. They return `404` when `COPILOT_PROXY_SUPER_PASSWORD` is unset, and invalid admin credentials return `401`. The password must be nonempty printable ASCII without whitespace. Reset clears usage, including accounting from requests already in flight; it preserves model access rules and token allowances. Reported reset times are Unix timestamps in seconds.
+
+`server --model-policy-file /path/to/private-config.json` loads the complete policy configuration from a JSON file instead of the three policy environment variables. Service installation creates such a private file automatically.
 
 ## Docker Compose
 
@@ -121,13 +168,15 @@ docker compose logs -f copilot-proxy
 docker compose down
 ```
 
-`RUST_LOG` and `COPILOT_PROXY_API_KEY` are passed into the container when set in the shell or the project's `.env` file. To enable authentication, set `COPILOT_PROXY_API_KEY` before `docker compose up -d` and include the bearer header in requests. Compose intentionally uses the persisted device-flow token instead of forwarding the host's `GITHUB_TOKEN`. The host binding can be changed with `COPILOT_PROXY_BIND`.
+`RUST_LOG`, `COPILOT_PROXY_API_KEY`, and the three model policy environment variables are passed into the container when set in the shell or the project's `.env` file. To enable authentication or limits, set their variables before `docker compose up -d`. Compose intentionally uses the persisted device-flow token instead of forwarding the host's `GITHUB_TOKEN`. The host binding can be changed with `COPILOT_PROXY_BIND`.
 
 ## API Surface
 
 | Route | Method | Behavior |
 |---|---|---|
 | `/v1/usage` | `GET` | Returns the current Copilot usage response. |
+| `/v1/admin/limits` | `GET` | Inspects model access and token counters using the super password. |
+| `/v1/admin/limits/reset` | `POST` | Clears all local token counters using the super password. |
 | `/v1/messages` | `POST` | Validates and forwards native Claude requests directly to Copilot. Non-Claude models return `400 Bad Request`. |
 | `/v1/messages/count_tokens` | `POST` | Forwards native Claude token-count requests directly to Copilot. |
 | `/v1/{*path}` | Any | Strips the leading `/v1` and forwards the request to the Copilot API. Chat-completion and Responses requests receive initiator and vision analysis. |
@@ -191,6 +240,9 @@ curl http://localhost:9876/v1/models
 |---|---|---|
 | `GITHUB_TOKEN` | Overrides the stored GitHub token. | Token file |
 | `COPILOT_PROXY_API_KEY` | Requires this bearer token on API routes; overridden by `--api-key` or `server --api-key-file`. | Unset (authentication disabled) |
+| `COPILOT_PROXY_MODEL_RULES` | Ordered model access rules and per-model `5h`/`7d` token allowances. | Unset (all allowed, no local limits) |
+| `COPILOT_PROXY_SUPER_PASSWORD` | Bearer password for limit inspection and reset endpoints. | Unset (admin endpoints disabled) |
+| `COPILOT_PROXY_LIMIT_STATE_PATH` | Absolute path for persistent local usage counters. | `~/.local/share/copilot-api-proxy/model_usage.json` |
 | `RUST_LOG` | Overrides the logging filter. | Unset |
 
 Token loading order:
@@ -217,6 +269,8 @@ copilot-api-proxy service uninstall
 ```
 
 Service installation also reads `COPILOT_PROXY_API_KEY`, with `--api-key` taking precedence. It saves the key at `~/.local/share/copilot-api-proxy/proxy_api_key` with mode `0600`; the service configuration contains only the file path. Reinstall the service to change its key and restart the running service.
+
+Model rules, the super password, and an optional usage-state path are captured from their environment variables during installation. They are saved in `~/.local/share/copilot-api-proxy/model_policy_config.json` with mode `0600`; only the file path appears in the service definition. Reinstall the service after changing these settings.
 
 ## How It Works
 

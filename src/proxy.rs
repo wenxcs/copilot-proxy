@@ -29,6 +29,17 @@ pub struct ProxyClient {
 }
 
 impl ProxyClient {
+    #[cfg(test)]
+    pub(crate) fn for_test(api_base: String) -> Self {
+        Self {
+            client: Client::new(),
+            token_manager: Arc::new(TokenManager::for_test(api_base)),
+            device_id: "test-device".to_string(),
+            machine_id: "test-machine".to_string(),
+            session_id: "test-session".to_string(),
+        }
+    }
+
     pub fn new(token_manager: Arc<TokenManager>) -> Result<Self, Error> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))

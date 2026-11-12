@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use copilot_api_proxy::{auth, config, server};
+use copilot_api_proxy::{auth, config, policy_config::PolicyConfig, server};
 use service_manager::{
     RestartPolicy, ServiceInstallCtx, ServiceLabel, ServiceLevel, ServiceManager, ServiceStartCtx,
     ServiceStatus, ServiceStatusCtx, ServiceStopCtx, ServiceUninstallCtx,
@@ -37,6 +37,9 @@ enum Commands {
         /// Read the client bearer token from a file instead of the environment
         #[arg(long, value_name = "PATH", conflicts_with = "api_key")]
         api_key_file: Option<PathBuf>,
+        /// Load model rules and the admin password from a private JSON file
+        #[arg(long, value_name = "PATH")]
+        model_policy_file: Option<PathBuf>,
     },
     /// Manage the system service
     Service {
@@ -76,7 +79,18 @@ async fn main() -> Result<()> {
             log_level,
             api_key,
             api_key_file,
-        } => run_server(&host, port, &log_level, api_key, api_key_file).await,
+            model_policy_file,
+        } => {
+            run_server(
+                &host,
+                port,
+                &log_level,
+                api_key,
+                api_key_file,
+                model_policy_file,
+            )
+            .await
+        }
         Commands::Service { action } => match action {
             ServiceAction::Install {
                 host,
@@ -110,6 +124,7 @@ async fn run_server(
     log_level: &str,
     api_key: Option<String>,
     api_key_file: Option<PathBuf>,
+    model_policy_file: Option<PathBuf>,
 ) -> Result<()> {
     let filter = format!("copilot_api_proxy={},tower_http={}", log_level, log_level);
     init_tracing(&filter);
@@ -118,7 +133,8 @@ async fn run_server(
         Some(path) => Some(config::load_proxy_api_key_file(&path)?),
         None => api_key,
     };
-    let state = server::AppState::new_with_api_key(api_key).await?;
+    let configuration = PolicyConfig::load(model_policy_file.as_deref())?;
+    let state = server::AppState::new_with_policy_config(api_key, configuration).await?;
     let app = server::create_router(state);
 
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port)).await?;
@@ -147,6 +163,7 @@ const SERVICE_LABEL: &str = "wxplus.copilot-api-proxy";
 
 fn install_service(host: &str, port: u16, api_key: Option<String>) -> Result<()> {
     let api_key = config::resolve_proxy_api_key(api_key)?;
+    let configuration = PolicyConfig::load(None)?;
     let label: ServiceLabel = SERVICE_LABEL.parse()?;
     let mut manager = <dyn ServiceManager>::native()?;
 
@@ -176,6 +193,11 @@ fn install_service(host: &str, port: u16, api_key: Option<String>) -> Result<()>
         let path = config::proxy_api_key_path();
         config::write_token(&path, &api_key)?;
         args.push(OsString::from("--api-key-file"));
+        args.push(path.into_os_string());
+    }
+    if configuration.is_configured() {
+        let path = configuration.save_for_service()?;
+        args.push(OsString::from("--model-policy-file"));
         args.push(path.into_os_string());
     }
 

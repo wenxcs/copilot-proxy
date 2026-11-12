@@ -138,6 +138,19 @@ pub struct TokenManager {
 }
 
 impl TokenManager {
+    #[cfg(test)]
+    pub(crate) fn for_test(api_base: String) -> Self {
+        Self {
+            github_token: "test-github-token".to_string(),
+            copilot_token: Arc::new(RwLock::new(Some(CopilotToken {
+                token: "test-upstream-token".to_string(),
+                api_base,
+                refresh_at: std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+            }))),
+            refresh_handle: tokio::spawn(std::future::pending()),
+        }
+    }
+
     pub async fn new(github_token: String) -> Result<Self, Error> {
         let initial = Self::fetch_token(&github_token).await?;
         let copilot_token = Arc::new(RwLock::new(Some(initial)));

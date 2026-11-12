@@ -10,6 +10,9 @@ services:
     environment:
       - RUST_LOG
       - COPILOT_PROXY_API_KEY
+      - COPILOT_PROXY_MODEL_RULES
+      - COPILOT_PROXY_SUPER_PASSWORD
+      - COPILOT_PROXY_LIMIT_STATE_PATH
     volumes:
       - copilot-home:/home/copilot
     init: true
