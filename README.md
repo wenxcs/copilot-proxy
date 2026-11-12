@@ -16,6 +16,7 @@ A Rust reverse proxy that exposes GitHub Copilot through OpenAI-compatible `/v1/
 - Streaming, tool/function calling, and vision support
 - Sticky `X-Initiator` inference for multi-turn requests
 - GitHub OAuth device-flow authentication
+- Optional OpenAI-style bearer-token authentication for clients
 - Background Copilot token refresh
 - User-level service installation
 
@@ -56,6 +57,26 @@ copilot-api-proxy server --log-level debug
 ```
 
 Use `http://localhost:9876/v1` as the base URL for an OpenAI-compatible client. Native Claude clients can use `http://localhost:9876` so their requests reach `/v1/messages`.
+
+## Client API Key
+
+Set a proxy API key to require authentication:
+
+```bash
+export COPILOT_PROXY_API_KEY=your-secret-key
+copilot-api-proxy server
+```
+
+Alternatively, use `copilot-api-proxy server --api-key your-secret-key` or `copilot-api-proxy server --api-key-file /path/to/private-key`. These flags override `COPILOT_PROXY_API_KEY` and cannot be combined. Key files may end with a newline. Missing files and invalid configured keys prevent startup. Keys must be nonempty and contain only ASCII letters, digits, or `-._~+/=`. Without a configured key, the proxy accepts requests without client authentication.
+
+Configure an OpenAI-compatible client with this key, or send it directly:
+
+```bash
+curl http://localhost:9876/v1/models \
+  -H "Authorization: Bearer $COPILOT_PROXY_API_KEY"
+```
+
+Authentication covers every matched `/v1/*` route, including usage and native Claude endpoints. Native Claude clients must also send `Authorization: Bearer <key>`. Missing or invalid credentials return `401` with a JSON error and `WWW-Authenticate: Bearer`. The proxy API key is separate from the GitHub OAuth token and is never forwarded to Copilot.
 
 ## Docker Compose
 
@@ -100,7 +121,7 @@ docker compose logs -f copilot-proxy
 docker compose down
 ```
 
-`RUST_LOG` is passed into the container when it is set in the shell. Compose intentionally uses the persisted device-flow token instead of forwarding the host's `GITHUB_TOKEN`. The host binding can be changed with `COPILOT_PROXY_BIND`, but exposing the proxy beyond loopback should be done only on a trusted network because proxy routes do not require a client API key.
+`RUST_LOG` and `COPILOT_PROXY_API_KEY` are passed into the container when set in the shell or the project's `.env` file. To enable authentication, set `COPILOT_PROXY_API_KEY` before `docker compose up -d` and include the bearer header in requests. Compose intentionally uses the persisted device-flow token instead of forwarding the host's `GITHUB_TOKEN`. The host binding can be changed with `COPILOT_PROXY_BIND`.
 
 ## API Surface
 
@@ -169,6 +190,7 @@ curl http://localhost:9876/v1/models
 | Variable | Description | Default |
 |---|---|---|
 | `GITHUB_TOKEN` | Overrides the stored GitHub token. | Token file |
+| `COPILOT_PROXY_API_KEY` | Requires this bearer token on API routes; overridden by `--api-key` or `server --api-key-file`. | Unset (authentication disabled) |
 | `RUST_LOG` | Overrides the logging filter. | Unset |
 
 Token loading order:
@@ -187,9 +209,14 @@ copilot-api-proxy service install
 # Install on a custom address
 copilot-api-proxy service install --host 0.0.0.0 --port 8080
 
+# Install with client authentication
+copilot-api-proxy service install --api-key your-secret-key
+
 # Uninstall
 copilot-api-proxy service uninstall
 ```
+
+Service installation also reads `COPILOT_PROXY_API_KEY`, with `--api-key` taking precedence. It saves the key at `~/.local/share/copilot-api-proxy/proxy_api_key` with mode `0600`; the service configuration contains only the file path. Reinstall the service to change its key and restart the running service.
 
 ## How It Works
 

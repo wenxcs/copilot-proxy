@@ -5,9 +5,10 @@ use clap::{Parser, Subcommand};
 use copilot_api_proxy::{auth, config, server};
 use service_manager::{
     RestartPolicy, ServiceInstallCtx, ServiceLabel, ServiceLevel, ServiceManager, ServiceStartCtx,
-    ServiceUninstallCtx,
+    ServiceStatus, ServiceStatusCtx, ServiceStopCtx, ServiceUninstallCtx,
 };
 use std::ffi::OsString;
+use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
@@ -30,6 +31,12 @@ enum Commands {
         port: u16,
         #[arg(long, default_value = "info")]
         log_level: String,
+        /// Require a client bearer token (or set COPILOT_PROXY_API_KEY)
+        #[arg(long, value_name = "TOKEN")]
+        api_key: Option<String>,
+        /// Read the client bearer token from a file instead of the environment
+        #[arg(long, value_name = "PATH", conflicts_with = "api_key")]
+        api_key_file: Option<PathBuf>,
     },
     /// Manage the system service
     Service {
@@ -47,6 +54,9 @@ enum ServiceAction {
         host: String,
         #[arg(short, long, default_value = "9876")]
         port: u16,
+        /// Require a client bearer token (or set COPILOT_PROXY_API_KEY)
+        #[arg(long, value_name = "TOKEN")]
+        api_key: Option<String>,
     },
     /// Uninstall the service daemon
     Uninstall,
@@ -64,9 +74,15 @@ async fn main() -> Result<()> {
             host,
             port,
             log_level,
-        } => run_server(&host, port, &log_level).await,
+            api_key,
+            api_key_file,
+        } => run_server(&host, port, &log_level, api_key, api_key_file).await,
         Commands::Service { action } => match action {
-            ServiceAction::Install { host, port } => install_service(&host, port),
+            ServiceAction::Install {
+                host,
+                port,
+                api_key,
+            } => install_service(&host, port, api_key),
             ServiceAction::Uninstall => uninstall_service(),
         },
     }
@@ -88,11 +104,21 @@ async fn run_auth() -> Result<()> {
     Ok(())
 }
 
-async fn run_server(host: &str, port: u16, log_level: &str) -> Result<()> {
+async fn run_server(
+    host: &str,
+    port: u16,
+    log_level: &str,
+    api_key: Option<String>,
+    api_key_file: Option<PathBuf>,
+) -> Result<()> {
     let filter = format!("copilot_api_proxy={},tower_http={}", log_level, log_level);
     init_tracing(&filter);
 
-    let state = server::AppState::new().await?;
+    let api_key = match api_key_file {
+        Some(path) => Some(config::load_proxy_api_key_file(&path)?),
+        None => api_key,
+    };
+    let state = server::AppState::new_with_api_key(api_key).await?;
     let app = server::create_router(state);
 
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port)).await?;
@@ -119,12 +145,13 @@ fn init_tracing(default_filter: &str) {
 
 const SERVICE_LABEL: &str = "wxplus.copilot-api-proxy";
 
-fn install_service(host: &str, port: u16) -> Result<()> {
+fn install_service(host: &str, port: u16, api_key: Option<String>) -> Result<()> {
+    let api_key = config::resolve_proxy_api_key(api_key)?;
     let label: ServiceLabel = SERVICE_LABEL.parse()?;
     let mut manager = <dyn ServiceManager>::native()?;
 
     let program = std::env::current_exe()?;
-    let args = vec![
+    let mut args = vec![
         OsString::from("server"),
         OsString::from("--host"),
         OsString::from(host),
@@ -133,6 +160,25 @@ fn install_service(host: &str, port: u16) -> Result<()> {
     ];
 
     manager.set_level(ServiceLevel::User)?;
+    if matches!(
+        manager.status(ServiceStatusCtx {
+            label: label.clone(),
+        })?,
+        ServiceStatus::Running
+    ) {
+        manager.stop(ServiceStopCtx {
+            label: label.clone(),
+        })?;
+    }
+
+    if let Some(api_key) = api_key {
+        config::ensure_token_dir()?;
+        let path = config::proxy_api_key_path();
+        config::write_token(&path, &api_key)?;
+        args.push(OsString::from("--api-key-file"));
+        args.push(path.into_os_string());
+    }
+
     manager.install(ServiceInstallCtx {
         label: label.clone(),
         program,

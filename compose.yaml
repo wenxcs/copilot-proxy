@@ -9,6 +9,7 @@ services:
       - "${COPILOT_PROXY_BIND:-127.0.0.1}:${COPILOT_PROXY_PORT:-9876}:9876"
     environment:
       - RUST_LOG
+      - COPILOT_PROXY_API_KEY
     volumes:
       - copilot-home:/home/copilot
     init: true

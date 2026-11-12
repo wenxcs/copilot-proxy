@@ -1,6 +1,7 @@
 //! Axum server: router, handlers, and application state.
 
 use crate::auth::TokenManager;
+use crate::client_auth;
 use crate::error::Error;
 use crate::llm;
 use crate::proxy::ProxyClient;
@@ -8,6 +9,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, Path, State};
 use axum::http::{HeaderMap, Method, Request};
+use axum::middleware;
 use axum::response::Response;
 use axum::routing::{any, get};
 use std::sync::Arc;
@@ -16,14 +18,20 @@ use tower_http::trace::MakeSpan;
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) proxy: Arc<ProxyClient>,
+    api_key: Option<Arc<str>>,
 }
 
 impl AppState {
     pub async fn new() -> Result<Self, Error> {
+        Self::new_with_api_key(None).await
+    }
+
+    pub async fn new_with_api_key(api_key: Option<String>) -> Result<Self, Error> {
+        let api_key = crate::config::resolve_proxy_api_key(api_key)?.map(Arc::from);
         let token = crate::config::load_github_token()?;
         let manager = Arc::new(TokenManager::new(token).await?);
         let proxy = Arc::new(ProxyClient::new(manager)?);
-        Ok(Self { proxy })
+        Ok(Self { proxy, api_key })
     }
 }
 
@@ -56,6 +64,10 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/usage", get(usage_handler))
         .route("/v1/{*path}", any(proxy_handler))
+        .route_layer(middleware::from_fn_with_state(
+            state.api_key.clone(),
+            client_auth::authenticate,
+        ))
         .layer(tower_http::trace::TraceLayer::new_for_http().make_span_with(CopilotMakeSpan))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             10 * 1024 * 1024,

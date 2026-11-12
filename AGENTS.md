@@ -60,6 +60,9 @@ curl http://localhost:9876/v1/usage
 # Overrides the stored GitHub token
 export GITHUB_TOKEN=your_github_token
 
+# Requires Authorization: Bearer <key> on API routes (optional)
+export COPILOT_PROXY_API_KEY=your-secret-key
+
 # Overrides logging completely
 export RUST_LOG=copilot_api_proxy=debug,tower_http=debug
 ```
@@ -90,6 +93,7 @@ src/
 ├── main.rs       # CLI entry point and service management
 ├── lib.rs        # Library exports
 ├── auth.rs       # GitHub device flow and Copilot token manager
+├── client_auth.rs # Optional incoming bearer-token authentication
 ├── config.rs     # Token and VS Code identity storage
 ├── server.rs     # Axum state, router, and /v1 dispatch
 ├── llm.rs        # OpenAI and native Claude route handlers
@@ -100,6 +104,12 @@ src/
 ```
 
 ## Critical Implementation Details
+
+### Client Authentication
+
+An optional `COPILOT_PROXY_API_KEY` requires `Authorization: Bearer <key>` on every matched `/v1/*` route, including usage and native Claude routes. `server --api-key`, `server --api-key-file`, and `service install --api-key` override the environment. The two server key flags conflict. Explicit key files must exist; only trailing CR/LF characters are stripped. Keys must be nonempty and contain only ASCII letters, digits, or `-._~+/=`; invalid configured keys are rejected, and an unset key preserves unauthenticated access. Invalid or missing client credentials return `401` JSON with `WWW-Authenticate: Bearer` before handlers inspect request bodies. Non-API paths retain normal `404` responses.
+
+The proxy API key is separate from GitHub OAuth and is never forwarded upstream. Service installation saves it in `~/.local/share/copilot-api-proxy/proxy_api_key` with mode `0600`, passes only its path in service arguments, and restarts an existing active service so changes take effect. Token files are created privately and existing permissions are restricted before writing secrets. Compose forwards the environment variable from the shell or `.env`.
 
 ### Generic `/v1/*` Passthrough
 

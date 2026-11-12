@@ -300,6 +300,7 @@ dependencies = [
  "serde",
  "serde_json",
  "service-manager",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tower",

@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod claude;
+mod client_auth;
 pub mod config;
 pub mod error;
 pub mod initiator;
